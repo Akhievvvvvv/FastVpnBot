@@ -1,0 +1,2 @@
+# FastVpnBot
+VPN subscription

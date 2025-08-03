@@ -2,7 +2,7 @@ import asyncio
 import secrets
 from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, types
-from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove, InputFile, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove, InputFile
 from aiogram.utils import executor
 
 API_TOKEN = '8484443635:AAGpJkY1qDtfDFmvsh-cbu6CIYqC8cfVTD8'
@@ -10,15 +10,13 @@ API_TOKEN = '8484443635:AAGpJkY1qDtfDFmvsh-cbu6CIYqC8cfVTD8'
 SERVER_PUBLIC_KEY = 'D4na0QwqCtqZatcyavT95NmLITuEaCjsnS9yl0mymUA='
 SERVER_IP = '109.196.100.159'
 SERVER_PORT = 51820
+SERVER_INTERFACE = 'wg0'
 
 ADMIN_GROUP_ID = -1002593269045
 BOT_USERNAME = 'FastVpn_bot_bot'
 
-bot = Bot(token=API_TOKEN)
+bot = Bot(token=API_TOKEN, parse_mode='HTML')
 dp = Dispatcher(bot)
-
-issued_clients = {}
-last_assigned_ip = 1
 
 TARIFFS = {
     "1": {"name": "1 месяц", "price": 99, "days": 30},
@@ -26,177 +24,162 @@ TARIFFS = {
     "5": {"name": "5 месяцев", "price": 449, "days": 150}
 }
 
-REFERRAL_PREFIX = "ref_"
+issued_clients = {}  # user_id: {данные}
+last_assigned_ip = 2
+
+REF_PREFIX = "ref_"
 
 def generate_private_key():
     return secrets.token_urlsafe(32)
 
 def generate_client_ip():
     global last_assigned_ip
+    ip = f"10.0.0.{last_assigned_ip}"
     last_assigned_ip += 1
-    return f"10.0.0.{last_assigned_ip}"
+    return ip
 
-def generate_wg_config(client_private_key: str, client_ip: str) -> str:
+def generate_wg_config(private_key, client_ip):
     return f"""[Interface]
-PrivateKey = {client_private_key}
+PrivateKey = {private_key}
 Address = {client_ip}/24
 DNS = 1.1.1.1
 
 [Peer]
 PublicKey = {SERVER_PUBLIC_KEY}
 Endpoint = {SERVER_IP}:{SERVER_PORT}
-AllowedIPs = 0.0.0.0/0, ::/0
+AllowedIPs = 0.0.0.0/0
 PersistentKeepalive = 25
 """
 
-def format_payment_notification(username, user_id, tariff_key):
-    tariff = TARIFFS[tariff_key]
-    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    return (
-        f"💸 <b>Новый платёж:</b>\n\n"
-        f"👤 Пользователь: @{username}\n"
-        f"🆔 ID: {user_id}\n"
-        f"📦 Тариф: {tariff['name']} — {tariff['price']}₽\n"
-        f"⏰ Время: {now_str}"
-    )
-
-def main_menu_keyboard():
+def main_menu():
     kb = ReplyKeyboardMarkup(resize_keyboard=True)
-    kb.add(KeyboardButton("💳 Выбрать тариф"))
-    kb.add(KeyboardButton("🤝 Реферальная система"))
+    kb.add(KeyboardButton("💳 Тарифы"))
+    kb.add(KeyboardButton("🎁 Реферальная система"))
     return kb
 
-def tariffs_keyboard():
+def tariff_keyboard():
     kb = ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
     for key, val in TARIFFS.items():
         kb.add(KeyboardButton(f"{val['name']} — {val['price']}₽"))
     kb.add(KeyboardButton("⬅️ Назад"))
     return kb
 
-def payment_info_keyboard():
+def payment_keyboard():
     kb = ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
     kb.add(KeyboardButton("✅ Я оплатил(а)"))
     kb.add(KeyboardButton("⬅️ Назад"))
     return kb
 
 @dp.message_handler(commands=['start'])
-async def cmd_start(message: types.Message):
+async def start(message: types.Message):
     user_id = message.from_user.id
     ref = None
-    if message.get_args().startswith(REFERRAL_PREFIX):
+    if message.get_args().startswith(REF_PREFIX):
         try:
-            ref = int(message.get_args()[len(REFERRAL_PREFIX):])
+            ref = int(message.get_args()[len(REF_PREFIX):])
         except:
             ref = None
     if user_id not in issued_clients:
         issued_clients[user_id] = {
-            "referral_from": ref,
-            "subscription_expire": datetime.now(),
+            "ref_from": ref,
+            "paid": False,
             "private_key": None,
             "ip": None,
             "tariff": None,
-            "paid": False
+            "subscription_expire": None
         }
-    welcome_text = (
-        "👋 <b>Привет!</b> Это простой VPN для безопасного интернета! 🌐🔒\n\n"
-        "Выбирай тариф, оплачивай, а я помогу с настройкой VPN. 🚀\n\n"
-        "Для начала установи официальное приложение WireGuard:\n"
-        "📱 <b>Android:</b> https://play.google.com/store/apps/details?id=com.wireguard.android\n"
-        "🍎 <b>iOS:</b> https://apps.apple.com/app/wireguard/id1441195209\n\n"
-        "После оплаты я пришлю тебе файл конфигурации, который можно открыть прямо из Telegram для быстрой настройки.\n\n"
-        "👇 Выбери действие в меню ниже 👇"
+    welcome = (
+        "👋 <b>Привет!</b> Добро пожаловать в FastVPN! 🔐\n\n"
+        "📲 Установи <b>WireGuard</b>:\n"
+        "• Android: https://play.google.com/store/apps/details?id=com.wireguard.android\n"
+        "• iOS: https://apps.apple.com/app/wireguard/id1441195209\n\n"
+        "Выбери тариф, оплати, и я пришлю конфигурацию для подключения.\n\n"
+        "👇 Выбирай ниже 👇"
     )
-    await message.answer(welcome_text, reply_markup=main_menu_keyboard())
+    await message.answer(welcome, reply_markup=main_menu())
 
-@dp.message_handler(lambda m: m.text == "💳 Выбрать тариф")
-async def choose_tariff(message: types.Message):
-    await message.answer("🛒 Выбери тариф из списка ниже:", reply_markup=tariffs_keyboard())
+@dp.message_handler(lambda m: m.text == "💳 Тарифы")
+async def show_tariffs(message: types.Message):
+    await message.answer("💼 Выбери тариф:", reply_markup=tariff_keyboard())
 
-@dp.message_handler(lambda m: any(m.text == f"{val['name']} — {val['price']}₽" for val in TARIFFS.values()))
+@dp.message_handler(lambda m: any(m.text == f"{v['name']} — {v['price']}₽" for v in TARIFFS.values()))
 async def selected_tariff(message: types.Message):
-    chosen = None
+    user_id = message.from_user.id
     for key, val in TARIFFS.items():
         if message.text == f"{val['name']} — {val['price']}₽":
-            chosen = key
+            issued_clients[user_id]['tariff'] = key
             break
-    if not chosen:
-        await message.answer("❌ Неизвестный тариф, попробуй ещё раз.")
-        return
-    user_id = message.from_user.id
-    issued_clients.setdefault(user_id, {})
-    issued_clients[user_id]["tariff"] = chosen
-    issued_clients[user_id]["paid"] = False
-
-    pay_text = (
-        f"💰 <b>Реквизиты для оплаты:</b>\n\n"
-        f"🧾 Тариф: <b>{TARIFFS[chosen]['name']} — {TARIFFS[chosen]['price']}₽</b>\n"
-        f"🏦 Оплата на карту Ozon Банка:\n"
+    await message.answer(
+        f"💰 Реквизиты для оплаты:\n\n"
+        f"🧾 Тариф: {message.text}\n"
+        f"🏦 Переведи на карту <b>Ozon Банк</b>:\n"
         f"<code>89322229930</code>\n\n"
-        f"После оплаты нажми кнопку ниже, чтобы сообщить мне."
+        f"После оплаты нажми <b>«Я оплатил(а)»</b> 👇",
+        reply_markup=payment_keyboard()
     )
-    await message.answer(pay_text, reply_markup=payment_info_keyboard())
 
 @dp.message_handler(lambda m: m.text == "✅ Я оплатил(а)")
-async def user_paid(message: types.Message):
-    user = message.from_user
-    user_id = user.id
+async def payment_confirmed(message: types.Message):
+    user_id = message.from_user.id
+    client = issued_clients.get(user_id)
+    if not client or not client.get("tariff"):
+        await message.answer("❗ Сначала выбери тариф.")
+        return
+    if client["paid"]:
+        await message.answer("⏳ Уже жду подтверждение от администратора.")
+        return
+    client["paid"] = True
+    tariff = TARIFFS[client["tariff"]]
+    msg = (
+        f"💸 <b>Новый платёж:</b>\n\n"
+        f"👤 Пользователь: @{message.from_user.username}\n"
+        f"🆔 ID: {user_id}\n"
+        f"📦 Тариф: {tariff['name']} — {tariff['price']}₽\n"
+        f"⏰ Время: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+        f"<b>Напиши /confirm_{user_id}, чтобы подтвердить</b>"
+    )
+    await bot.send_message(ADMIN_GROUP_ID, msg)
+    await message.answer("🕐 Оплата зафиксирована! Жди подтверждения 👀", reply_markup=main_menu())
 
-    if user_id not in issued_clients or not issued_clients[user_id].get("tariff"):
-        await message.answer("⚠️ Пожалуйста, сначала выбери тариф.")
+@dp.message_handler(lambda m: m.text.startswith("/confirm_"))
+async def admin_confirm(message: types.Message):
+    if message.chat.id != ADMIN_GROUP_ID:
+        return
+    try:
+        user_id = int(message.text.split("_")[1])
+    except:
+        return
+    client = issued_clients.get(user_id)
+    if not client or not client["paid"]:
+        await message.reply("⚠️ Невозможно подтвердить — нет данных.")
         return
 
-    if issued_clients[user_id].get("paid"):
-        await message.answer("✅ Ты уже сообщил об оплате, жди подтверждения от администратора.")
-        return
+    client["private_key"] = generate_private_key()
+    client["ip"] = generate_client_ip()
+    days = TARIFFS[client["tariff"]]["days"]
+    client["subscription_expire"] = datetime.now() + timedelta(days=days)
+    client["paid"] = False
 
-    issued_clients[user_id]["paid"] = True
-
-    tariff_key = issued_clients[user_id]["tariff"]
-    username = user.username or user.first_name
-
-    notification_text = format_payment_notification(username, user_id, tariff_key)
-
-    confirm_button = InlineKeyboardMarkup()
-    confirm_button.add(InlineKeyboardButton("✅ Подтвердить", callback_data=f"confirm_{user_id}"))
-
-    await bot.send_message(ADMIN_GROUP_ID, notification_text, reply_markup=confirm_button)
-    await message.answer("🕐 Оплата зарегистрирована! Жди подтверждения от администратора.", reply_markup=main_menu_keyboard())
-
-@dp.callback_query_handler(lambda c: c.data and c.data.startswith("confirm_"))
-async def admin_confirm_payment(callback_query: types.CallbackQuery):
-    admin_id = callback_query.from_user.id
-    user_id_str = callback_query.data.split("_")[1]
-    user_id = int(user_id_str)
-
-    if user_id not in issued_clients or not issued_clients[user_id].get("paid"):
-        await callback_query.answer("❌ Платёж не найден или уже подтверждён.", show_alert=True)
-        return
-
-    priv_key = generate_private_key()
-    client_ip = generate_client_ip()
-
-    issued_clients[user_id].update({
-        "private_key": priv_key,
-        "ip": client_ip,
-        "subscription_expire": datetime.now() + timedelta(days=TARIFFS[issued_clients[user_id]["tariff"]]["days"]),
-        "paid": False
-    })
-
-    wg_config = generate_wg_config(priv_key, client_ip)
-    filename = f"vpn_{user_id}.conf"
+    config_text = generate_wg_config(client["private_key"], client["ip"])
+    filename = f"wg_{user_id}.conf"
     with open(filename, "w") as f:
-        f.write(wg_config)
+        f.write(config_text)
 
     await bot.send_document(user_id, InputFile(filename), caption=(
-        "🎉 Оплата подтверждена! Вот твой файл конфигурации WireGuard.\n\n"
-        "📱 Просто открой этот файл в приложении WireGuard, и включи VPN одной кнопкой!\n\n"
-        "Если ещё не установил приложение, вот ссылки:\n"
+        "✅ Оплата подтверждена!\n\n"
+        "📁 Ниже твой конфиг для WireGuard.\n"
+        "🔌 Просто открой его в приложении и включи VPN.\n\n"
         "📲 Android: https://play.google.com/store/apps/details?id=com.wireguard.android\n"
         "🍏 iOS: https://apps.apple.com/app/wireguard/id1441195209\n\n"
-        "Безопасного интернета! 🔒🌐"
-    ), reply_markup=main_menu_keyboard())
+        "🔥 Приятного пользования!"
+    ))
+    await message.reply("✅ Конфигурация выдана!")
 
-    await callback_query.message.edit_reply_markup(reply_markup=None)
-
-if __name__ == '__main__':
-    executor.start_polling(dp, skip_updates=True)
+@dp.message_handler(lambda m: m.text == "🎁 Реферальная система")
+async def referral_system(message: types.Message):
+    ref_link = f"https://t.me/{BOT_USERNAME}?start=ref_{message.from_user.id}"
+    await message.answer(
+        f"🎁 <b>Пригласи друзей и получи +7 дней!</b>\n\n"
+        f"📨 Твоя ссылка:\n<code>{ref_link}</code>\n\n"
+        f"Если кто-то оплатит по ней, ты получишь бонус 🎉"
+    )

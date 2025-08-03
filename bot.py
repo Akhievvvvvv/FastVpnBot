@@ -5,8 +5,9 @@ import asyncio
 import secrets
 from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, types
-from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove, InputFile, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InputFile
 from aiogram.utils import executor
+import subprocess
 
 API_TOKEN = '8484443635:AAGpJkY1qDtfDFmvsh-cbu6CIYqC8cfVTD8'
 
@@ -33,7 +34,13 @@ last_assigned_ip = 2
 REF_PREFIX = "ref_"
 
 def generate_private_key():
-    return secrets.token_urlsafe(32)
+    result = subprocess.run(['wg', 'genkey'], capture_output=True, text=True)
+    return result.stdout.strip()
+
+def generate_public_key(private_key):
+    process = subprocess.Popen(['wg', 'pubkey'], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+    pubkey, _ = process.communicate(input=private_key)
+    return pubkey.strip()
 
 def generate_client_ip():
     global last_assigned_ip
@@ -42,6 +49,7 @@ def generate_client_ip():
     return ip
 
 def generate_wg_config(private_key, client_ip):
+    public_key = generate_public_key(private_key)
     return f"""[Interface]
 PrivateKey = {private_key}
 Address = {client_ip}/24
@@ -133,6 +141,8 @@ async def payment_confirmed(message: types.Message):
         return
     client["paid"] = True
     tariff = TARIFFS[client["tariff"]]
+    confirm_button = types.InlineKeyboardMarkup()
+    confirm_button.add(types.InlineKeyboardButton("✅ Подтвердить", callback_data=f"confirm_{user_id}"))
     msg = (
         f"💸 <b>Новый платёж:</b>\n\n"
         f"👤 Пользователь: @{message.from_user.username}\n"
@@ -140,18 +150,22 @@ async def payment_confirmed(message: types.Message):
         f"📦 Тариф: {tariff['name']} — {tariff['price']}₽\n"
         f"⏰ Время: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
     )
-    confirm_button = InlineKeyboardMarkup().add(
-        InlineKeyboardButton("✅ Подтвердить", callback_data=f"confirm_{user_id}")
-    )
     await bot.send_message(ADMIN_GROUP_ID, msg, reply_markup=confirm_button)
     await message.answer("🕐 Оплата зафиксирована! Жди подтверждения 👀", reply_markup=main_menu())
 
 @dp.callback_query_handler(lambda c: c.data and c.data.startswith("confirm_"))
-async def confirm_callback(call: types.CallbackQuery):
-    user_id = int(call.data.split("_")[1])
+async def admin_confirm_callback(call: types.CallbackQuery):
+    if call.message.chat.id != ADMIN_GROUP_ID:
+        await call.answer("❌ Нет доступа")
+        return
+    try:
+        user_id = int(call.data.split("_")[1])
+    except:
+        await call.answer("❌ Ошибка в ID")
+        return
     client = issued_clients.get(user_id)
     if not client or not client["paid"]:
-        await call.answer("⚠️ Невозможно подтвердить — нет данных или уже подтверждено.", show_alert=True)
+        await call.answer("⚠️ Невозможно подтвердить — нет данных.")
         return
 
     client["private_key"] = generate_private_key()
@@ -173,9 +187,8 @@ async def confirm_callback(call: types.CallbackQuery):
         "🍏 iOS: https://apps.apple.com/app/wireguard/id1441195209\n\n"
         "🔥 Приятного пользования!"
     ))
-    await call.message.edit_reply_markup()  # Убираем кнопку после подтверждения
-    await call.message.answer(f"✅ Конфигурация выдана пользователю с ID {user_id}!")
-    await call.answer("✅ Подтверждено!")
+    await call.message.edit_reply_markup(None)
+    await call.answer("✅ Подтверждено и конфиг выдан!")
 
 @dp.message_handler(lambda m: m.text == "🎁 Реферальная система")
 async def referral_system(message: types.Message):

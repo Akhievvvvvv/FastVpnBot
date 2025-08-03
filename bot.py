@@ -1,14 +1,13 @@
 import logging
 import random
 import asyncio
-import base64
+from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, types
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-from datetime import datetime, timedelta
 
 logging.basicConfig(level=logging.INFO)
 
-# Токен бота (лучше брать из переменных окружения в проде)
+# Токен бота (лучше ставить в переменную окружения, но для примера так)
 BOT_TOKEN = "8484443635:AAGpJkY1qDtfDFmvsh-cbu6CIYqC8cfVTD8"
 if not BOT_TOKEN:
     print("Error: BOT_TOKEN is not set!")
@@ -17,36 +16,30 @@ if not BOT_TOKEN:
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(bot)
 
-ADMIN_CHAT_ID = -1002593269045  # ID твоей админ-группы
-MY_ADMIN_ID = 7231676236  # Твой личный ID для подтверждения подписок
+ADMIN_CHAT_ID = -1002593269045  # твоя админ-группа
+ADMIN_USER_ID = 7231676236      # твой личный ID для подтверждения
 
-REF_BONUS_DAYS = 7  # бонусные дни за рефералов
-BONUS_3MONTH_DAYS = 15  # бонусные дни за подписку 3 месяца
+REF_BONUS_DAYS = 7
+BONUS_3MONTH_DAYS = 15
+roulette_days = [3, 5, 7, 10]
+
+# Для примера конфиги можно заменить ссылками или строками
 CONFIGS = {
-    'default': 'config_default.ovpn',
-    'fastvpn': 'config_fastvpn.ovpn',
-    'securevpn': 'config_securevpn.ovpn',
+    'default': 'https://example.com/configs/default.ovpn',
+    'fastvpn': 'https://example.com/configs/fastvpn.ovpn',
+    'securevpn': 'https://example.com/configs/securevpn.ovpn',
 }
 
-# В памяти храним пользователей
+# Хранение данных пользователей (лучше хранить в БД)
 users = {}
-
-# Ожидающие оплаты
 payments_pending = {}
-
-# Бонусная рулетка дней
-roulette_days = [3, 5, 7, 10]
 
 FAQ_TEXT = (
     "❓ <b>Часто задаваемые вопросы</b>\n\n"
-    "1️⃣ Как купить подписку?\n"
-    "➡️ Выберите тариф и оплатите через наш банк.\n\n"
-    "2️⃣ Как сменить конфигурацию VPN?\n"
-    "➡️ Используйте кнопку 'Сменить конфиг' в меню.\n\n"
-    "3️⃣ Как получить бонусные дни?\n"
-    "➡️ За подписки на 3 месяца, рефералов и в рулетке.\n\n"
-    "4️⃣ Как связаться с поддержкой?\n"
-    "➡️ Нажмите кнопку 'Поддержка' и напишите нам.\n\n"
+    "1️⃣ Как купить подписку?\n➡️ Выберите тариф и оплатите.\n\n"
+    "2️⃣ Как сменить конфигурацию VPN?\n➡️ Используйте кнопку 'Сменить конфиг'.\n\n"
+    "3️⃣ Как получить бонусные дни?\n➡️ За подписки и рефералов.\n\n"
+    "4️⃣ Как связаться с поддержкой?\n➡️ Нажмите кнопку 'Поддержка'.\n"
 )
 
 WELCOME_TEXT = (
@@ -80,8 +73,7 @@ async def cmd_start(message: types.Message):
             "subscription_until": None,
             "config": "default",
             "referrals": 0,
-            "vpn_link": None,
-            "vpn_password": None,
+            "roulette_used": False,  # Отметка, что рулетка использована
         }
     await message.answer(WELCOME_TEXT, reply_markup=main_menu())
 
@@ -90,8 +82,16 @@ async def process_callback(callback_query: types.CallbackQuery):
     data = callback_query.data
     user_id = callback_query.from_user.id
 
+    if user_id not in users:
+        users[user_id] = {
+            "subscription_until": None,
+            "config": "default",
+            "referrals": 0,
+            "roulette_used": False,
+        }
+
     if data.startswith("buy_"):
-        months = int(data.split("_")[1][0])
+        months = int(data.split("_")[1][0])  # 'buy_1m' -> 1, 'buy_3m' -> 3, 'buy_5m' -> 5
         price_map = {1: 100, 3: 250, 5: 400}
         price = price_map.get(months)
         if not price:
@@ -136,19 +136,17 @@ async def process_callback(callback_query: types.CallbackQuery):
 
     elif data.startswith("admin_confirm_"):
         admin_user_id = callback_query.from_user.id
-        if admin_user_id != ADMIN_CHAT_ID and admin_user_id != MY_ADMIN_ID:
+        if admin_user_id != ADMIN_CHAT_ID and admin_user_id != ADMIN_USER_ID:
             await callback_query.answer("У вас нет прав на подтверждение.", show_alert=True)
             return
-
         uid = int(data.split("_")[-1])
         if uid not in payments_pending:
             await callback_query.answer("Оплата не найдена или уже подтверждена.", show_alert=True)
             return
-
         pay_info = payments_pending.pop(uid)
+
         now = datetime.now()
         current_until = users.get(uid, {}).get("subscription_until")
-
         if current_until and current_until > now:
             new_until = current_until + timedelta(days=30*pay_info["months"])
         else:
@@ -161,30 +159,18 @@ async def process_callback(callback_query: types.CallbackQuery):
         new_until += timedelta(days=bonus_days)
 
         users.setdefault(uid, {})["subscription_until"] = new_until
+        users[uid]["roulette_used"] = False  # при новой подписке рулетка снова доступна
 
-        # Генерация личной VPN-ссылки (если ещё нет)
-        if not users[uid].get("vpn_link"):
-            method = "chacha20-ietf"
-            password = f"user{uid}_{random.randint(1000,9999)}"
-            ip = "109.196.100.159"
-            port = 1833
-            credentials = f"{method}:{password}"
-            encoded = base64.urlsafe_b64encode(credentials.encode()).decode().rstrip("=")
-            link = f"ss://{encoded}@{ip}:{port}#user_{uid}"
-            users[uid]["vpn_link"] = link
-            users[uid]["vpn_password"] = password
-        else:
-            link = users[uid]["vpn_link"]
+        # Формируем уникальную VPN ссылку для пользователя
+        vpn_link = f"https://example.com/vpnconfig/{uid}.ovpn"
 
         try:
             await bot.send_message(
                 uid,
                 f"✅ Ваша подписка активирована до {new_until.strftime('%Y-%m-%d %H:%M:%S')}!\n"
                 f"🎁 Включая бонусы {bonus_days} дней!\n\n"
-                f"🌐 Ваша личная VPN-ссылка:\n"
-                f"<code>{link}</code>\n\n"
-                f"📲 Вставьте эту ссылку в приложение Outline VPN или Shadowsocks.",
-                parse_mode="HTML"
+                f"🔗 Ваша персональная VPN ссылка для Outline VPN:\n{vpn_link}\n\n"
+                "Скопируйте ссылку и вставьте в приложение Outline для подключения."
             )
         except Exception:
             pass
@@ -196,17 +182,17 @@ async def process_callback(callback_query: types.CallbackQuery):
         if not user or not user.get("subscription_until") or user["subscription_until"] < datetime.now():
             await callback_query.answer("У вас нет активной подписки.", show_alert=True)
             return
+        if user.get("roulette_used", False):
+            await callback_query.answer("Вы уже использовали рулетку бонусов.", show_alert=True)
+            return
 
         reward_days = random.choice(roulette_days)
         user["subscription_until"] += timedelta(days=reward_days)
+        user["roulette_used"] = True
         await callback_query.answer(f"🎉 Поздравляем! Вам добавлено {reward_days} бонусных дней!", show_alert=True)
 
     elif data == "change_config":
         user = users.get(user_id)
-        if not user:
-            await callback_query.answer("Пользователь не найден.")
-            return
-
         current_config = user.get("config", "default")
         configs_kb = InlineKeyboardMarkup(row_width=1)
         for c in CONFIGS.keys():
@@ -222,7 +208,7 @@ async def process_callback(callback_query: types.CallbackQuery):
             return
         users[user_id]["config"] = config_name
         await callback_query.answer(f"Конфигурация изменена на {config_name}.")
-        await callback_query.message.answer(f"Теперь ваш конфиг: {config_name}")
+        await callback_query.message.answer(f"Теперь ваш конфиг: {config_name}\nСсылка: {CONFIGS[config_name]}")
 
     elif data == "faq":
         await callback_query.message.answer(FAQ_TEXT, parse_mode="HTML")

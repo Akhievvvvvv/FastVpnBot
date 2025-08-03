@@ -9,7 +9,7 @@ from datetime import datetime, timedelta
 logging.basicConfig(level=logging.INFO)
 
 # Получаем токен из переменной окружения (сделай в Render переменную BOT_TOKEN)
-BOT_TOKEN = os.getenv('BOT_TOKEN')
+BOT_TOKEN = "8484443635:AAGpJkY1qDtfDFmvsh-cbu6CIYqC8cfVTD8"
 if not BOT_TOKEN:
     print("Error: BOT_TOKEN is not set!")
     exit(1)

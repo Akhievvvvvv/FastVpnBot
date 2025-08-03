@@ -1,11 +1,13 @@
 import logging
 import random
 import asyncio
-import requests
-import urllib3
 from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, types
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+import requests
+import urllib3
+
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 logging.basicConfig(level=logging.INFO)
 
@@ -21,12 +23,29 @@ payments_pending = {}  # user_id -> {"months": int, "price": int, "timestamp": d
 
 roulette_days = [3, 5, 7, 10]
 
-# Outline API настройки
+# Настройки Outline API
 OUTLINE_API_URL = "https://109.196.100.159:55633"
-OUTLINE_API_KEY = "bkz9X4_oG7jiaYtDNinlBQ"
+OUTLINE_API_TOKEN = "bkz9X4_oG7jiaYtDNinlBQ"
 
-# Отключаем предупреждения SSL, если сертификат самоподписан
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+def create_outline_user():
+    url = f"{OUTLINE_API_URL}/access-keys"
+    headers = {
+        "Authorization": f"Bearer {OUTLINE_API_TOKEN}",
+        "Content-Type": "application/json"
+    }
+    data = {
+        "name": "FastVpnBot User"
+    }
+    try:
+        response = requests.post(url, headers=headers, json=data, verify=False)
+        response.raise_for_status()
+        key_data = response.json()
+        return key_data.get("accessUrl")
+    except requests.HTTPError as http_err:
+        print(f"HTTP ошибка Outline API: {response.status_code} - {response.text}")
+    except Exception as e:
+        print(f"Ошибка Outline API: {e}")
+    return None
 
 def main_menu():
     kb = InlineKeyboardMarkup(row_width=2)
@@ -39,29 +58,6 @@ def main_menu():
         InlineKeyboardButton("🎰 Рулетка бонусов", callback_data="roulette"),
     )
     return kb
-
-def create_outline_user():
-    url = f"{OUTLINE_API_URL}/access-keys"
-    headers = {
-        "Authorization": f"Bearer {OUTLINE_API_KEY}",
-        "Content-Type": "application/json"
-    }
-    try:
-        response = requests.post(url, headers=headers, verify=False)
-        response.raise_for_status()
-        data = response.json()
-        access_url = data.get("accessUrl")
-        if access_url:
-            logging.info(f"Создана Outline ссылка: {access_url}")
-            return access_url
-        else:
-            logging.error(f"Ответ Outline API не содержит accessUrl: {data}")
-            return None
-    except requests.HTTPError as http_err:
-        logging.error(f"HTTP ошибка Outline API: {response.status_code} - {response.text}")
-    except Exception as err:
-        logging.error(f"Ошибка Outline API: {err}")
-    return None
 
 @dp.message_handler(commands=["start"])
 async def cmd_start(message: types.Message):

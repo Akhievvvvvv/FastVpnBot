@@ -4,7 +4,6 @@ import asyncio
 from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, types
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-from outline_vpn.outline import OutlineAPI  # <--- новая библиотека
 
 logging.basicConfig(level=logging.INFO)
 

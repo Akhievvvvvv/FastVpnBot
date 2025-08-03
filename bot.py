@@ -106,7 +106,7 @@ async def process_callback(callback_query: types.CallbackQuery):
         users[uid]["subscription_until"] = new_until
         users[uid]["roulette_used"] = False  # Сброс рулетки
 
-        vpn_link = f"https://your-vpn-server.com/configs/{uid}.ovpn"
+        vpn_link = f"http://109.196.100.159/configs/{uid}.ovpn"
 
         try:
             await bot.send_message(

@@ -1,3 +1,4 @@
+print("✅ Бот запущен!")
 import logging
 logging.basicConfig(level=logging.INFO)
 import asyncio
@@ -185,3 +186,8 @@ async def referral_system(message: types.Message):
         f"📨 Твоя ссылка:\n<code>{ref_link}</code>\n\n"
         f"Если кто-то оплатит по ней, ты получишь бонус 🎉"
     )
+
+if __name__ == '__main__':
+    print("🚀 Бот запущен и ожидает команды...")
+    from aiogram import executor
+    executor.start_polling(dp, skip_updates=True)

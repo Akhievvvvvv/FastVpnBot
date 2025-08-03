@@ -5,7 +5,7 @@ import asyncio
 import secrets
 from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, types
-from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove, InputFile
+from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove, InputFile, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.utils import executor
 
 API_TOKEN = '8484443635:AAGpJkY1qDtfDFmvsh-cbu6CIYqC8cfVTD8'
@@ -138,23 +138,20 @@ async def payment_confirmed(message: types.Message):
         f"👤 Пользователь: @{message.from_user.username}\n"
         f"🆔 ID: {user_id}\n"
         f"📦 Тариф: {tariff['name']} — {tariff['price']}₽\n"
-        f"⏰ Время: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
-        f"<b>Напиши /confirm_{user_id}, чтобы подтвердить</b>"
+        f"⏰ Время: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
     )
-    await bot.send_message(ADMIN_GROUP_ID, msg)
+    confirm_button = InlineKeyboardMarkup().add(
+        InlineKeyboardButton("✅ Подтвердить", callback_data=f"confirm_{user_id}")
+    )
+    await bot.send_message(ADMIN_GROUP_ID, msg, reply_markup=confirm_button)
     await message.answer("🕐 Оплата зафиксирована! Жди подтверждения 👀", reply_markup=main_menu())
 
-@dp.message_handler(lambda m: m.text.startswith("/confirm_"))
-async def admin_confirm(message: types.Message):
-    if message.chat.id != ADMIN_GROUP_ID:
-        return
-    try:
-        user_id = int(message.text.split("_")[1])
-    except:
-        return
+@dp.callback_query_handler(lambda c: c.data and c.data.startswith("confirm_"))
+async def confirm_callback(call: types.CallbackQuery):
+    user_id = int(call.data.split("_")[1])
     client = issued_clients.get(user_id)
     if not client or not client["paid"]:
-        await message.reply("⚠️ Невозможно подтвердить — нет данных.")
+        await call.answer("⚠️ Невозможно подтвердить — нет данных или уже подтверждено.", show_alert=True)
         return
 
     client["private_key"] = generate_private_key()
@@ -176,7 +173,9 @@ async def admin_confirm(message: types.Message):
         "🍏 iOS: https://apps.apple.com/app/wireguard/id1441195209\n\n"
         "🔥 Приятного пользования!"
     ))
-    await message.reply("✅ Конфигурация выдана!")
+    await call.message.edit_reply_markup()  # Убираем кнопку после подтверждения
+    await call.message.answer(f"✅ Конфигурация выдана пользователю с ID {user_id}!")
+    await call.answer("✅ Подтверждено!")
 
 @dp.message_handler(lambda m: m.text == "🎁 Реферальная система")
 async def referral_system(message: types.Message):
@@ -189,5 +188,4 @@ async def referral_system(message: types.Message):
 
 if __name__ == '__main__':
     print("🚀 Бот запущен и ожидает команды...")
-    from aiogram import executor
     executor.start_polling(dp, skip_updates=True)

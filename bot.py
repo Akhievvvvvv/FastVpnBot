@@ -4,6 +4,8 @@ import asyncio
 from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, types
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+import requests
+import urllib3
 
 logging.basicConfig(level=logging.INFO)
 
@@ -19,6 +21,9 @@ payments_pending = {}  # user_id -> {"months": int, "price": int, "timestamp": d
 
 roulette_days = [3, 5, 7, 10]
 
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+OUTLINE_API_URL = "https://109.196.100.159:58337/0An2zKqWWzbVhTnMDZYUxA"
+
 def main_menu():
     kb = InlineKeyboardMarkup(row_width=2)
     kb.add(
@@ -30,6 +35,20 @@ def main_menu():
         InlineKeyboardButton("🎰 Рулетка бонусов", callback_data="roulette"),
     )
     return kb
+
+def create_outline_user():
+    try:
+        url = f"{OUTLINE_API_URL}/access-keys"
+        response = requests.post(url, verify=False)
+        if response.status_code == 200:
+            data = response.json()
+            return data['accessUrl']  # Уникальная ссылка Outline
+        else:
+            print(f"Ошибка Outline API: {response.status_code} {response.text}")
+            return None
+    except Exception as e:
+        print(f"Ошибка при запросе Outline API: {e}")
+        return None
 
 @dp.message_handler(commands=["start"])
 async def cmd_start(message: types.Message):
@@ -106,18 +125,22 @@ async def process_callback(callback_query: types.CallbackQuery):
         users[uid]["subscription_until"] = new_until
         users[uid]["roulette_used"] = False  # Сброс рулетки
 
-        vpn_link = f"http://109.196.100.159/configs/{uid}.ovpn"
+        outline_link = create_outline_user()
 
-        try:
+        if outline_link:
             await bot.send_message(
                 uid,
                 f"✅ Ваша подписка активирована до {new_until.strftime('%Y-%m-%d %H:%M:%S')}!\n"
                 f"🎁 Бонусные дни: {bonus_days}\n\n"
-                f"🔗 Ваша персональная VPN-ссылка для Outline:\n{vpn_link}\n\n"
+                f"🔗 Ваша персональная VPN-ссылка для Outline:\n{outline_link}\n\n"
                 "Вставьте эту ссылку в приложение Outline и подключайтесь."
             )
-        except Exception:
-            pass
+        else:
+            await bot.send_message(
+                uid,
+                "✅ Ваша подписка активирована, но не удалось получить ссылку Outline VPN.\n"
+                "Свяжитесь с поддержкой для получения доступа."
+            )
 
         await callback_query.answer("Подписка подтверждена и активирована.")
 

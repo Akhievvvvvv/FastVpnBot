@@ -4,7 +4,6 @@ import asyncio
 import os
 from aiogram import Bot, Dispatcher, types
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-from aiogram.utils import executor
 from datetime import datetime, timedelta
 
 logging.basicConfig(level=logging.INFO)
@@ -16,7 +15,7 @@ if not BOT_TOKEN:
     exit(1)
 
 bot = Bot(token=BOT_TOKEN)
-dp = Dispatcher(bot)
+dp = Dispatcher()
 
 # Настройки
 ADMIN_CHAT_ID = -1002593269045  # группа для подтверждения оплат
@@ -183,8 +182,6 @@ async def process_callback(callback_query: types.CallbackQuery):
 
         await callback_query.answer("Подписка подтверждена и активирована.")
 
-        # Можно добавить логи и уведомления админу
-
     elif data == "roulette":
         # Игрок запускает рулетку (бонус)
         user = users.get(user_id)
@@ -233,4 +230,4 @@ async def process_callback(callback_query: types.CallbackQuery):
 # Запуск бота
 if __name__ == "__main__":
     print("Bot started")
-    executor.start_polling(dp, skip_updates=True)
+    asyncio.run(dp.start_polling(bot))

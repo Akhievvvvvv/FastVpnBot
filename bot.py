@@ -1,43 +1,42 @@
 import logging
 import random
 import asyncio
-import os
+import base64
 from aiogram import Bot, Dispatcher, types
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from datetime import datetime, timedelta
 
 logging.basicConfig(level=logging.INFO)
 
-# Получаем токен из переменной окружения (сделай в Render переменную BOT_TOKEN)
+# Токен бота (лучше брать из переменных окружения в проде)
 BOT_TOKEN = "8484443635:AAGpJkY1qDtfDFmvsh-cbu6CIYqC8cfVTD8"
 if not BOT_TOKEN:
     print("Error: BOT_TOKEN is not set!")
     exit(1)
 
 bot = Bot(token=BOT_TOKEN)
-dp = Dispatcher()
+dp = Dispatcher(bot)
 
-# Настройки
-ADMIN_CHAT_ID = -1002593269045  # группа для подтверждения оплат
-REF_BONUS_DAYS = 7  # бонус за каждого реферала
-BONUS_3MONTH_DAYS = 15  # бонус для покупателя 3 месяцев
+ADMIN_CHAT_ID = -1002593269045  # ID твоей админ-группы
+MY_ADMIN_ID = 7231676236  # Твой личный ID для подтверждения подписок
+
+REF_BONUS_DAYS = 7  # бонусные дни за рефералов
+BONUS_3MONTH_DAYS = 15  # бонусные дни за подписку 3 месяца
 CONFIGS = {
     'default': 'config_default.ovpn',
     'fastvpn': 'config_fastvpn.ovpn',
     'securevpn': 'config_securevpn.ovpn',
 }
 
-# Подписки пользователей (для простоты - в памяти)
-# Лучше заменить на базу данных
+# В памяти храним пользователей
 users = {}
 
-# Состояния оплаты
+# Ожидающие оплаты
 payments_pending = {}
 
-# Рулетка бонусов для новых подписок (1,3,5 месяцев)
+# Бонусная рулетка дней
 roulette_days = [3, 5, 7, 10]
 
-# FAQ текст
 FAQ_TEXT = (
     "❓ <b>Часто задаваемые вопросы</b>\n\n"
     "1️⃣ Как купить подписку?\n"
@@ -50,14 +49,12 @@ FAQ_TEXT = (
     "➡️ Нажмите кнопку 'Поддержка' и напишите нам.\n\n"
 )
 
-# Приветственное сообщение
 WELCOME_TEXT = (
     "👋 Привет! Я бот FastVPN 🛡️\n"
     "Здесь можно купить подписку на VPN с бонусами и реферальной системой.\n\n"
     "Выбери тариф и начни пользоваться уже сегодня!"
 )
 
-# Клавиатуры
 def main_menu():
     kb = InlineKeyboardMarkup(row_width=2)
     kb.add(
@@ -75,7 +72,6 @@ def main_menu():
     )
     return kb
 
-# Обработка команды /start
 @dp.message_handler(commands=["start"])
 async def cmd_start(message: types.Message):
     user_id = message.from_user.id
@@ -84,31 +80,30 @@ async def cmd_start(message: types.Message):
             "subscription_until": None,
             "config": "default",
             "referrals": 0,
+            "vpn_link": None,
+            "vpn_password": None,
         }
     await message.answer(WELCOME_TEXT, reply_markup=main_menu())
 
-# Обработка нажатий кнопок
 @dp.callback_query_handler(lambda c: c.data)
 async def process_callback(callback_query: types.CallbackQuery):
     data = callback_query.data
     user_id = callback_query.from_user.id
 
     if data.startswith("buy_"):
-        months = int(data.split("_")[1][0])  # 'buy_1m' -> 1, 'buy_3m' -> 3, 'buy_5m' -> 5
+        months = int(data.split("_")[1][0])
         price_map = {1: 100, 3: 250, 5: 400}
         price = price_map.get(months)
         if not price:
             await callback_query.answer("Ошибка тарифа")
             return
 
-        # Отправляем сообщение об оплате (без ФИО)
         pay_text = (
             f"💳 Вы выбрали подписку на {months} месяц(ев) за {price}₽.\n"
             "Оплатите на номер карты Ozon Банка:\n"
             "+7 932 222-99-30\n\n"
             "После оплаты нажмите кнопку ниже, чтобы подтвердить."
         )
-        # Сохраняем ожидание оплаты
         payments_pending[user_id] = {
             "months": months,
             "price": price,
@@ -120,14 +115,12 @@ async def process_callback(callback_query: types.CallbackQuery):
         await callback_query.answer()
 
     elif data == "paid_confirm":
-        # Проверяем есть ли pending payment
         if user_id not in payments_pending:
             await callback_query.answer("Нет ожидающей оплаты.", show_alert=True)
             return
 
         pay_info = payments_pending[user_id]
 
-        # Отправляем в админ-группу на подтверждение
         confirm_text = (
             f"🛎 Пользователь @{callback_query.from_user.username or user_id} "
             f"запросил активацию подписки:\n"
@@ -142,26 +135,25 @@ async def process_callback(callback_query: types.CallbackQuery):
         await callback_query.answer("Запрос отправлен на подтверждение администратору.", show_alert=True)
 
     elif data.startswith("admin_confirm_"):
-        # Подтверждение админом
         admin_user_id = callback_query.from_user.id
-        if admin_user_id != ADMIN_CHAT_ID and admin_user_id != 7231676236:  # Твой ID, чтобы ты тоже мог подтверждать
+        if admin_user_id != ADMIN_CHAT_ID and admin_user_id != MY_ADMIN_ID:
             await callback_query.answer("У вас нет прав на подтверждение.", show_alert=True)
             return
+
         uid = int(data.split("_")[-1])
         if uid not in payments_pending:
             await callback_query.answer("Оплата не найдена или уже подтверждена.", show_alert=True)
             return
-        pay_info = payments_pending.pop(uid)
 
-        # Активируем подписку
+        pay_info = payments_pending.pop(uid)
         now = datetime.now()
         current_until = users.get(uid, {}).get("subscription_until")
+
         if current_until and current_until > now:
             new_until = current_until + timedelta(days=30*pay_info["months"])
         else:
             new_until = now + timedelta(days=30*pay_info["months"])
 
-        # Бонусы за подписку
         bonus_days = 0
         if pay_info["months"] == 3:
             bonus_days += BONUS_3MONTH_DAYS
@@ -170,12 +162,29 @@ async def process_callback(callback_query: types.CallbackQuery):
 
         users.setdefault(uid, {})["subscription_until"] = new_until
 
-        # Отправляем уведомление юзеру
+        # Генерация личной VPN-ссылки (если ещё нет)
+        if not users[uid].get("vpn_link"):
+            method = "chacha20-ietf"
+            password = f"user{uid}_{random.randint(1000,9999)}"
+            ip = "109.196.100.159"
+            port = 1833
+            credentials = f"{method}:{password}"
+            encoded = base64.urlsafe_b64encode(credentials.encode()).decode().rstrip("=")
+            link = f"ss://{encoded}@{ip}:{port}#user_{uid}"
+            users[uid]["vpn_link"] = link
+            users[uid]["vpn_password"] = password
+        else:
+            link = users[uid]["vpn_link"]
+
         try:
             await bot.send_message(
                 uid,
                 f"✅ Ваша подписка активирована до {new_until.strftime('%Y-%m-%d %H:%M:%S')}!\n"
-                f"🎁 Включая бонусы {bonus_days} дней!"
+                f"🎁 Включая бонусы {bonus_days} дней!\n\n"
+                f"🌐 Ваша личная VPN-ссылка:\n"
+                f"<code>{link}</code>\n\n"
+                f"📲 Вставьте эту ссылку в приложение Outline VPN или Shadowsocks.",
+                parse_mode="HTML"
             )
         except Exception:
             pass
@@ -183,22 +192,21 @@ async def process_callback(callback_query: types.CallbackQuery):
         await callback_query.answer("Подписка подтверждена и активирована.")
 
     elif data == "roulette":
-        # Игрок запускает рулетку (бонус)
         user = users.get(user_id)
         if not user or not user.get("subscription_until") or user["subscription_until"] < datetime.now():
             await callback_query.answer("У вас нет активной подписки.", show_alert=True)
             return
-        # Можно ограничить, например, раз в день (не реализовано)
+
         reward_days = random.choice(roulette_days)
         user["subscription_until"] += timedelta(days=reward_days)
         await callback_query.answer(f"🎉 Поздравляем! Вам добавлено {reward_days} бонусных дней!", show_alert=True)
 
     elif data == "change_config":
-        # Сменить конфигурацию
         user = users.get(user_id)
         if not user:
             await callback_query.answer("Пользователь не найден.")
             return
+
         current_config = user.get("config", "default")
         configs_kb = InlineKeyboardMarkup(row_width=1)
         for c in CONFIGS.keys():
@@ -227,7 +235,6 @@ async def process_callback(callback_query: types.CallbackQuery):
     else:
         await callback_query.answer("Неизвестная команда.")
 
-# Запуск бота
 if __name__ == "__main__":
     print("Bot started")
-    asyncio.run(dp.start_polling(bot))
+    asyncio.run(dp.start_polling())

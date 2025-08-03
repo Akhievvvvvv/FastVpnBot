@@ -1,12 +1,13 @@
 import asyncio
 import secrets
+from datetime import datetime
 from aiogram import Bot, Dispatcher, types
-from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.utils import executor
 
 API_TOKEN = '8484443635:AAGpJkY1qDtfDFmvsh-cbu6CIYqC8cfVTD8'
+ADMIN_CHAT_ID = -1002593269045  # Вставьте свой админский чат ID
 
-# Настройки WireGuard
+# WireGuard серверные данные
 SERVER_PUBLIC_KEY = 'D4na0QwqCtqZatcyavT95NmLITuEaCjsnS9yl0mymUA='
 SERVER_IP = '109.196.100.159'
 SERVER_PORT = 51820
@@ -16,14 +17,13 @@ dp = Dispatcher(bot)
 
 issued_clients = {}
 last_assigned_ip = 1
+user_tariffs = {}  # user_id -> выбранный тариф
 
 TARIFFS = {
-    "1 месяц": 100,
-    "3 месяца (+бонусные дни)": 250,
-    "5 месяцев (+бонусные дни)": 400,
+    "1 месяц — 100₽": 30,
+    "3 месяца — 250₽ (+бонусные дни)": 30*3,  # Бонусные дни можно реализовать отдельно
+    "5 месяцев — 400₽ (+бонусные дни)": 30*5,
 }
-
-REKVIZITS = "Реквизиты для оплаты:\n\n📱 Телефон: 89322229930\n🏦 Банк: Ozon bank"
 
 def generate_private_key():
     return secrets.token_urlsafe(32)
@@ -46,83 +46,76 @@ AllowedIPs = 0.0.0.0/0, ::/0
 PersistentKeepalive = 25
 """
 
-def main_menu_keyboard():
-    kb = InlineKeyboardMarkup(row_width=1)
-    for t in TARIFFS:
-        kb.insert(InlineKeyboardButton(text=f"{t} — {TARIFFS[t]} ₽", callback_data=f"tariff_{t}"))
-    kb.insert(InlineKeyboardButton(text="FAQ 🤔", callback_data="faq"))
-    kb.insert(InlineKeyboardButton(text="Реферальная система 🎁", callback_data="referral"))
-    return kb
-
-def payment_keyboard():
-    kb = InlineKeyboardMarkup()
-    kb.add(InlineKeyboardButton(text="Я оплатил, жду подтверждения ✅", callback_data="paid"))
-    return kb
-
 @dp.message_handler(commands=['start'])
 async def cmd_start(message: types.Message):
+    keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    keyboard.add("Тарифы 💰", "Реферальная система 🎁", "Оплатил(а) ✅")
     await message.answer(
-        "👋 Привет!\n\n"
-        "Я бот FastVpnBot — выдаю конфигурации WireGuard VPN после оплаты.\n"
-        "Выбери тариф для подключения:",
-        reply_markup=main_menu_keyboard()
+        "👋 Привет! Это простой VPN для безопасного интернета! 🌐🔒\n\n"
+        "Выбирай тариф, оплачивай, а я помогу с настройкой VPN. 🚀",
+        reply_markup=keyboard
     )
+
+@dp.message_handler(lambda m: m.text == "Тарифы 💰")
+async def show_tariffs(message: types.Message):
+    keyboard = types.InlineKeyboardMarkup()
+    for name in TARIFFS.keys():
+        keyboard.add(types.InlineKeyboardButton(text=name, callback_data=f"tariff_{name}"))
+    await message.answer("Выбери тариф для покупки:", reply_markup=keyboard)
 
 @dp.callback_query_handler(lambda c: c.data and c.data.startswith('tariff_'))
 async def process_tariff_selection(callback_query: types.CallbackQuery):
-    tariff_name = callback_query.data[7:]
-    price = TARIFFS.get(tariff_name)
-    if not price:
-        await callback_query.answer("Неизвестный тариф.")
-        return
-    text = f"Вы выбрали тариф: *{tariff_name}*\nЦена: *{price} ₽*\n\n"
-    text += REKVIZITS
-    text += "\n\nПосле оплаты нажмите кнопку ниже, чтобы сообщить мне, что оплатили."
-    await bot.send_message(callback_query.from_user.id, text, parse_mode='Markdown', reply_markup=payment_keyboard())
-    await callback_query.answer()
-
-@dp.callback_query_handler(lambda c: c.data == 'faq')
-async def process_faq(callback_query: types.CallbackQuery):
-    faq_text = (
-        "❓ *FAQ* ❓\n\n"
-        "➡️ *Реферальная система:*\n"
-        "Приглашайте друзей по вашей ссылке и получайте по 7 дней бонуса за каждого, кто оплатит подписку!\n\n"
-        "➡️ *Как оплатить:*\n"
-        "Переведите деньги на реквизиты, которые я выдал после выбора тарифа.\n\n"
-        "➡️ *Подтверждение оплаты:*\n"
-        "После оплаты сообщите мне, нажав кнопку \"Я оплатил\" в меню тарифа.\n\n"
-        "Администратор проверит оплату и подтвердит вашу подписку, после чего вы получите VPN конфигурацию."
-    )
-    await bot.send_message(callback_query.from_user.id, faq_text, parse_mode='Markdown')
-    await callback_query.answer()
-
-@dp.callback_query_handler(lambda c: c.data == 'referral')
-async def process_referral(callback_query: types.CallbackQuery):
-    referral_text = (
-        "🎁 *Реферальная система*\n\n"
-        "За каждого приглашённого вами человека, который оплатит подписку, вы получите +7 дней бесплатного использования VPN!\n\n"
-        "Поделитесь своей реферальной ссылкой с друзьями и зарабатывайте бонусы.\n\n"
-        "Реферальная ссылка будет доступна скоро (или можно добавить сейчас, если есть реализация)."
-    )
-    await bot.send_message(callback_query.from_user.id, referral_text, parse_mode='Markdown')
-    await callback_query.answer()
-
-@dp.callback_query_handler(lambda c: c.data == 'paid')
-async def process_paid(callback_query: types.CallbackQuery):
+    tariff_name = callback_query.data[len("tariff_"):]
+    user_tariffs[callback_query.from_user.id] = tariff_name
+    await bot.answer_callback_query(callback_query.id, text=f"Выбран тариф: {tariff_name}")
     await bot.send_message(callback_query.from_user.id,
-                           "Спасибо за оплату! Ожидайте подтверждения от администратора.")
-    await callback_query.answer()
+                           f"Вы выбрали тариф: {tariff_name}\n\n"
+                           f"После оплаты нажмите кнопку «Оплатил(а) ✅», чтобы сообщить нам.")
+
+@dp.message_handler(lambda m: m.text == "Реферальная система 🎁")
+async def referral_info(message: types.Message):
+    user_id = message.from_user.id
+    # Для примера сделаем просто текст с инфой и ссылкой
+    referral_link = f"https://t.me/YourBotUsername?start={user_id}"  # замените YourBotUsername
+    await message.answer(
+        f"🎉 Приглашай друзей и получай бонусы! 🎁\n\n"
+        f"За каждого приглашенного, который оплатит подписку, ты получаешь +7 дней бесплатно! ⏳\n\n"
+        f"Твоя реферальная ссылка:\n{referral_link}"
+    )
+
+@dp.message_handler(lambda m: m.text == "Оплатил(а) ✅")
+async def payment_confirm(message: types.Message):
+    user_id = message.from_user.id
+    username = message.from_user.username or "Не указан"
+    user_fullname = message.from_user.full_name
+    selected_tariff = user_tariffs.get(user_id, "Тариф не выбран")
+
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    admin_msg = (
+        f"💳 Подтверждение оплаты:\n"
+        f"👤 {user_fullname} (@{username})\n"
+        f"🆔 ID: {user_id}\n"
+        f"⏰ Время: {now_str}\n"
+        f"💼 Тариф: {selected_tariff}\n\n"
+        f"Используйте команду /confirm {user_id} для выдачи доступа."
+    )
+
+    await bot.send_message(ADMIN_CHAT_ID, admin_msg)
+    await message.answer("Спасибо! Оплата подтверждена, жди одобрения администратора. 🔥")
 
 @dp.message_handler(commands=['confirm'])
 async def admin_confirm_payment(message: types.Message):
+    # Ожидается: /confirm <user_id>
     args = message.text.split()
     if len(args) != 2:
         await message.answer("Использование: /confirm <user_id>")
         return
+
     try:
         user_id = int(args[1])
-    except ValueError:
-        await message.answer("Ошибка: user_id должен быть числом.")
+    except:
+        await message.answer("Неверный ID пользователя.")
         return
 
     if user_id in issued_clients:
@@ -140,10 +133,12 @@ async def admin_confirm_payment(message: types.Message):
     wg_config = generate_wg_config(client_private_key, client_ip)
 
     try:
-        await bot.send_message(user_id, "🎉 Ваша подписка активирована! Вот ваша конфигурация WireGuard:\n\n" + wg_config)
+        await bot.send_message(user_id,
+            "Ваша подписка активирована! Вот ваша конфигурация WireGuard VPN:\n\n" + wg_config)
         await message.answer(f"Конфигурация выдана пользователю {user_id}.")
     except Exception as e:
         await message.answer(f"Ошибка при отправке конфигурации пользователю {user_id}: {e}")
 
 if __name__ == '__main__':
+    print("Бот запущен...")
     executor.start_polling(dp, skip_updates=True)

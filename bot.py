@@ -4,8 +4,7 @@ import asyncio
 from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, types
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-import requests
-import urllib3
+from outline_vpn.outline import OutlineAPI  # <--- новая библиотека
 
 logging.basicConfig(level=logging.INFO)
 
@@ -21,11 +20,11 @@ payments_pending = {}  # user_id -> {"months": int, "price": int, "timestamp": d
 
 roulette_days = [3, 5, 7, 10]
 
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+# ✅ Актуальные данные из Outline API
+OUTLINE_API_URL = "https://109.196.100.159:55633/bkz9X4_oG7jiaYtDNinlBQ"
+OUTLINE_CERT_SHA256 = "F4F79829E95198A38C6AE5B02491C3BA7F7EBDC5C889906FFE9FB4EB16F26438"
 
-# Outline API настройки (токен должен совпадать с SB_API_PREFIX из docker run)
-OUTLINE_API_URL = "http://109.196.100.159:9090"
-OUTLINE_API_KEY = "0An2zKqWWzbVhTnMDZYUxA"  # ВАЖНО: заменить на ваш реальный ключ из переменной SB_API_PREFIX
+outline_api = OutlineAPI(api_url=OUTLINE_API_URL, cert_sha256=OUTLINE_CERT_SHA256)
 
 def main_menu():
     kb = InlineKeyboardMarkup(row_width=2)
@@ -40,21 +39,11 @@ def main_menu():
     return kb
 
 def create_outline_user():
-    headers = {
-        "Authorization": f"Bearer {OUTLINE_API_KEY}",
-        "Content-Type": "application/json",
-    }
     try:
-        url = f"{OUTLINE_API_URL}/access-keys"
-        response = requests.post(url, headers=headers, verify=False)
-        if response.status_code == 200:
-            data = response.json()
-            return data['accessUrl']  # Уникальная ссылка Outline
-        else:
-            print(f"Ошибка Outline API: {response.status_code} {response.text}")
-            return None
+        key = outline_api.create_key()
+        return key.access_url  # Уникальная ссылка Outline
     except Exception as e:
-        print(f"Ошибка при запросе Outline API: {e}")
+        print(f"Ошибка при создании Outline ключа: {e}")
         return None
 
 @dp.message_handler(commands=["start"])
@@ -121,7 +110,7 @@ async def process_callback(callback_query: types.CallbackQuery):
         else:
             new_until = now + timedelta(days=30 * pay_info["months"])
 
-        # Добавляем бонусные дни, если 3 или 5 месяцев
+        # Бонусные дни
         bonus_days = 0
         if pay_info["months"] == 3:
             bonus_days = 15
@@ -130,7 +119,7 @@ async def process_callback(callback_query: types.CallbackQuery):
         new_until += timedelta(days=bonus_days)
 
         users[uid]["subscription_until"] = new_until
-        users[uid]["roulette_used"] = False  # Сброс рулетки
+        users[uid]["roulette_used"] = False
 
         outline_link = create_outline_user()
 
@@ -140,16 +129,16 @@ async def process_callback(callback_query: types.CallbackQuery):
                 f"✅ Ваша подписка активирована до {new_until.strftime('%Y-%m-%d %H:%M:%S')}!\n"
                 f"🎁 Бонусные дни: {bonus_days}\n\n"
                 f"🔗 Ваша персональная VPN-ссылка для Outline:\n{outline_link}\n\n"
-                "Вставьте эту ссылку в приложение Outline и подключайтесь."
+                "Скопируйте её в приложение Outline и подключайтесь."
             )
         else:
             await bot.send_message(
                 uid,
-                "✅ Ваша подписка активирована, но не удалось получить ссылку Outline VPN.\n"
-                "Свяжитесь с поддержкой для получения доступа."
+                "✅ Подписка активирована, но не удалось выдать ссылку Outline.\n"
+                "Обратитесь в поддержку."
             )
 
-        await callback_query.answer("Подписка подтверждена и активирована.")
+        await callback_query.answer("Подписка активирована.")
 
     elif data == "roulette":
         user = users.get(user_id)
@@ -158,7 +147,7 @@ async def process_callback(callback_query: types.CallbackQuery):
             await callback_query.answer("У вас нет активной подписки.", show_alert=True)
             return
         if user["roulette_used"]:
-            await callback_query.answer("Рулетку бонусов можно использовать только один раз на подписку.", show_alert=True)
+            await callback_query.answer("Рулетку можно использовать только один раз на подписку.", show_alert=True)
             return
 
         reward_days = random.choice(roulette_days)

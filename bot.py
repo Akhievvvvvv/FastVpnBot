@@ -22,7 +22,10 @@ payments_pending = {}  # user_id -> {"months": int, "price": int, "timestamp": d
 roulette_days = [3, 5, 7, 10]
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-OUTLINE_API_URL = "https://109.196.100.159:58337/0An2zKqWWzbVhTnMDZYUxA"
+
+# Outline API настройки (токен должен совпадать с SB_API_PREFIX из docker run)
+OUTLINE_API_URL = "http://109.196.100.159:9090"
+OUTLINE_API_KEY = "0An2zKqWWzbVhTnMDZYUxA"  # ВАЖНО: заменить на ваш реальный ключ из переменной SB_API_PREFIX
 
 def main_menu():
     kb = InlineKeyboardMarkup(row_width=2)
@@ -37,9 +40,13 @@ def main_menu():
     return kb
 
 def create_outline_user():
+    headers = {
+        "Authorization": f"Bearer {OUTLINE_API_KEY}",
+        "Content-Type": "application/json",
+    }
     try:
         url = f"{OUTLINE_API_URL}/access-keys"
-        response = requests.post(url, verify=False)
+        response = requests.post(url, headers=headers, verify=False)
         if response.status_code == 200:
             data = response.json()
             return data['accessUrl']  # Уникальная ссылка Outline

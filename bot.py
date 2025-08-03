@@ -7,7 +7,6 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 logging.basicConfig(level=logging.INFO)
 
-# Токен бота (лучше ставить в переменную окружения, но для примера так)
 BOT_TOKEN = "8484443635:AAGpJkY1qDtfDFmvsh-cbu6CIYqC8cfVTD8"
 if not BOT_TOKEN:
     print("Error: BOT_TOKEN is not set!")
@@ -23,14 +22,12 @@ REF_BONUS_DAYS = 7
 BONUS_3MONTH_DAYS = 15
 roulette_days = [3, 5, 7, 10]
 
-# Для примера конфиги можно заменить ссылками или строками
 CONFIGS = {
     'default': 'https://example.com/configs/default.ovpn',
     'fastvpn': 'https://example.com/configs/fastvpn.ovpn',
     'securevpn': 'https://example.com/configs/securevpn.ovpn',
 }
 
-# Хранение данных пользователей (лучше хранить в БД)
 users = {}
 payments_pending = {}
 
@@ -51,9 +48,9 @@ WELCOME_TEXT = (
 def main_menu():
     kb = InlineKeyboardMarkup(row_width=2)
     kb.add(
-        InlineKeyboardButton("1 месяц - 100₽", callback_data="buy_1m"),
-        InlineKeyboardButton("3 месяца - 250₽ + бонус", callback_data="buy_3m"),
-        InlineKeyboardButton("5 месяцев - 400₽ + бонус", callback_data="buy_5m"),
+        InlineKeyboardButton("1 месяц - 100₽", callback_data="buy_1"),
+        InlineKeyboardButton("3 месяца - 250₽ + бонус", callback_data="buy_3"),
+        InlineKeyboardButton("5 месяцев - 400₽ + бонус", callback_data="buy_5"),
     )
     kb.add(
         InlineKeyboardButton("🎰 Рулетка бонусов", callback_data="roulette"),
@@ -73,7 +70,7 @@ async def cmd_start(message: types.Message):
             "subscription_until": None,
             "config": "default",
             "referrals": 0,
-            "roulette_used": False,  # Отметка, что рулетка использована
+            "roulette_used": False,
         }
     await message.answer(WELCOME_TEXT, reply_markup=main_menu())
 
@@ -91,7 +88,12 @@ async def process_callback(callback_query: types.CallbackQuery):
         }
 
     if data.startswith("buy_"):
-        months = int(data.split("_")[1][0])  # 'buy_1m' -> 1, 'buy_3m' -> 3, 'buy_5m' -> 5
+        try:
+            months = int(data.split("_")[1])
+        except Exception:
+            await callback_query.answer("Ошибка в выборе тарифа.")
+            return
+
         price_map = {1: 100, 3: 250, 5: 400}
         price = price_map.get(months)
         if not price:
@@ -136,7 +138,7 @@ async def process_callback(callback_query: types.CallbackQuery):
 
     elif data.startswith("admin_confirm_"):
         admin_user_id = callback_query.from_user.id
-        if admin_user_id != ADMIN_CHAT_ID and admin_user_id != ADMIN_USER_ID:
+        if admin_user_id != ADMIN_USER_ID:
             await callback_query.answer("У вас нет прав на подтверждение.", show_alert=True)
             return
         uid = int(data.split("_")[-1])
@@ -159,9 +161,8 @@ async def process_callback(callback_query: types.CallbackQuery):
         new_until += timedelta(days=bonus_days)
 
         users.setdefault(uid, {})["subscription_until"] = new_until
-        users[uid]["roulette_used"] = False  # при новой подписке рулетка снова доступна
+        users[uid]["roulette_used"] = False
 
-        # Формируем уникальную VPN ссылку для пользователя
         vpn_link = f"https://example.com/vpnconfig/{uid}.ovpn"
 
         try:
@@ -170,7 +171,8 @@ async def process_callback(callback_query: types.CallbackQuery):
                 f"✅ Ваша подписка активирована до {new_until.strftime('%Y-%m-%d %H:%M:%S')}!\n"
                 f"🎁 Включая бонусы {bonus_days} дней!\n\n"
                 f"🔗 Ваша персональная VPN ссылка для Outline VPN:\n{vpn_link}\n\n"
-                "Скопируйте ссылку и вставьте в приложение Outline для подключения."
+                "Скопируйте ссылку и вставьте в приложение Outline для подключения.",
+                parse_mode="HTML"
             )
         except Exception:
             pass
@@ -221,6 +223,9 @@ async def process_callback(callback_query: types.CallbackQuery):
     else:
         await callback_query.answer("Неизвестная команда.")
 
-if __name__ == "__main__":
+async def main():
     print("Bot started")
-    asyncio.run(dp.start_polling())
+    await dp.start_polling()
+
+if __name__ == "__main__":
+    asyncio.run(main())

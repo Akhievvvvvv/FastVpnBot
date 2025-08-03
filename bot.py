@@ -4,6 +4,8 @@ import asyncio
 from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, types
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+import requests
+import urllib3
 
 logging.basicConfig(level=logging.INFO)
 
@@ -21,9 +23,9 @@ roulette_days = [3, 5, 7, 10]
 
 # ✅ Актуальные данные из Outline API
 OUTLINE_API_URL = "https://109.196.100.159:55633/bkz9X4_oG7jiaYtDNinlBQ"
-OUTLINE_CERT_SHA256 = "F4F79829E95198A38C6AE5B02491C3BA7F7EBDC5C889906FFE9FB4EB16F26438"
 
-outline_api = OutlineAPI(api_url=OUTLINE_API_URL, cert_sha256=OUTLINE_CERT_SHA256)
+# Отключаем предупреждения о самоподписанном сертификате
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 def main_menu():
     kb = InlineKeyboardMarkup(row_width=2)
@@ -39,8 +41,23 @@ def main_menu():
 
 def create_outline_user():
     try:
-        key = outline_api.create_key()
-        return key.access_url  # Уникальная ссылка Outline
+        # Токен — это часть URL после последнего слеша
+        token = OUTLINE_API_URL.split('/')[-1]
+        api_base_url = OUTLINE_API_URL.rsplit('/', 1)[0]
+
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+        }
+
+        url = f"{api_base_url}/access-keys"
+        response = requests.post(url, headers=headers, verify=False)
+        if response.status_code == 200:
+            data = response.json()
+            return data["accessUrl"]  # Уникальная ссылка Outline
+        else:
+            print(f"Ошибка Outline API: {response.status_code} - {response.text}")
+            return None
     except Exception as e:
         print(f"Ошибка при создании Outline ключа: {e}")
         return None

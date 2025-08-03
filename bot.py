@@ -1,3 +1,5 @@
+import logging
+logging.basicConfig(level=logging.INFO)
 import asyncio
 import secrets
 from datetime import datetime, timedelta

@@ -85,9 +85,10 @@ def payment_keyboard():
 async def start(message: types.Message):
     user_id = message.from_user.id
     ref = None
-    if message.get_args().startswith(REF_PREFIX):
+    args = message.get_args()
+    if args.startswith(REF_PREFIX):
         try:
-            ref = int(message.get_args()[len(REF_PREFIX):])
+            ref = int(args[len(REF_PREFIX):])
         except:
             ref = None
     if user_id not in issued_clients:
@@ -168,9 +169,21 @@ async def admin_confirm_callback(call: types.CallbackQuery):
         await call.answer("⚠️ Невозможно подтвердить — нет данных.")
         return
 
+    # Генерируем ключи и IP
     client["private_key"] = generate_private_key()
     client["ip"] = generate_client_ip()
     days = TARIFFS[client["tariff"]]["days"]
+
+    # Проверка на реферала и добавление бонуса +7 дней
+    bonus_days = 0
+    referrer_id = client.get("ref_from")
+    if referrer_id and referrer_id in issued_clients:
+        issued_clients[referrer_id].setdefault("subscription_expire", datetime.now())
+        if issued_clients[referrer_id]["subscription_expire"] is None or issued_clients[referrer_id]["subscription_expire"] < datetime.now():
+            issued_clients[referrer_id]["subscription_expire"] = datetime.now()
+        issued_clients[referrer_id]["subscription_expire"] += timedelta(days=7)
+        bonus_days = 7
+
     client["subscription_expire"] = datetime.now() + timedelta(days=days)
     client["paid"] = False
 
@@ -186,6 +199,7 @@ async def admin_confirm_callback(call: types.CallbackQuery):
         "📲 Android: https://play.google.com/store/apps/details?id=com.wireguard.android\n"
         "🍏 iOS: https://apps.apple.com/app/wireguard/id1441195209\n\n"
         "🔥 Приятного пользования!"
+        + (f"\n\n🎉 Твой реферер получил бонус +7 дней!" if bonus_days else "")
     ))
     await call.message.edit_reply_markup(None)
     await call.answer("✅ Подтверждено и конфиг выдан!")
@@ -199,6 +213,30 @@ async def referral_system(message: types.Message):
         f"Если кто-то оплатит по ней, ты получишь бонус 🎉"
     )
 
+async def remind_expiration():
+    while True:
+        now = datetime.now()
+        for user_id, client in issued_clients.items():
+            expire = client.get("subscription_expire")
+            if expire:
+                days_left = (expire - now).days
+                if days_left == 3:
+                    try:
+                        await bot.send_message(user_id,
+                            "⏰ <b>Напоминание!</b>\n"
+                            "Через 3 дня заканчивается твоя подписка на FastVPN.\n"
+                            "Не забудь продлить, чтобы не потерять доступ! 🔐",
+                            parse_mode='HTML'
+                        )
+                    except Exception as e:
+                        logging.warning(f"Не удалось отправить напоминание {user_id}: {e}")
+        await asyncio.sleep(3600)  # Проверяем каждый час
+
 if __name__ == '__main__':
     print("🚀 Бот запущен и ожидает команды...")
+
+    # Запускаем задачу с напоминаниями в фоне
+    loop = asyncio.get_event_loop()
+    loop.create_task(remind_expiration())
+
     executor.start_polling(dp, skip_updates=True)

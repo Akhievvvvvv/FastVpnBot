@@ -212,4 +212,4 @@ async def check_subscription_expiry():
                     await db.commit()
                     try:
                         await bot.send_message(user_id,
-                            "⛔
+                            "⛔ Ваша подписка истекла. Пожалуйста, продлите её, чтобы продолжить пользоваться сервисом.")

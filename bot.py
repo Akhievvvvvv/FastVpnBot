@@ -208,8 +208,15 @@ async def check_subscription_expiry():
                 # Если подписка истекла
                 if subscription_end < now:
                     # Обнуляем paid, план и vpn_key
-                    await db.execute("UPDATE users SET paid = 0, plan = NULL, vpn_key = NULL, payment_time = NULL, subscription_end = NULL WHERE user_id = ?", (user_id,))
+                    await db.execute(
+                        "UPDATE users SET paid = 0, plan = NULL, vpn_key = NULL, payment_time = NULL, subscription_end = NULL WHERE user_id = ?",
+                        (user_id,)
+                    )
                     await db.commit()
                     try:
-                        await bot.send_message(user_id,
-                            "⛔ Ваша подписка истекла. Пожалуйста, продлите её, чтобы продолжить пользоваться сервисом.")
+                        await bot.send_message(
+                            user_id,
+                            "⛔ Ваша подписка истекла. Пожалуйста, продлите её, чтобы продолжить пользоваться сервисом."
+                        )
+                    except Exception as e:
+                        print(f"Ошибка при отправке сообщения пользователю {user_id}: {e}")

@@ -1,87 +1,95 @@
-import sqlite3
-from aiogram import Bot, Dispatcher, types
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-from aiogram.utils import executor
-import asyncio
 import logging
 import random
 import string
+import asyncio
 from datetime import datetime, timedelta
 
+from aiogram import Bot, Dispatcher, types
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.utils import executor
+import aiosqlite
+
 API_TOKEN = '8484443635:AAGpJkY1qDtfDFmvsh-cbu6CIYqC8cfVTD8'
+ADMIN_ID = 7231676236  # твой user_id
 
 logging.basicConfig(level=logging.INFO)
 
 bot = Bot(token=API_TOKEN)
 dp = Dispatcher(bot)
 
-ADMIN_ID = 7231676236  # Админ ID
-
+# Тарифы
 TARIFFS = {
     "1m": {"name": "1 месяц", "price": 99, "days": 30},
     "3m": {"name": "3 месяца", "price": 249, "days": 90},
     "5m": {"name": "5 месяцев", "price": 399, "days": 150}
 }
 
-# Инициализация базы SQLite
-conn = sqlite3.connect("fastvpn.db")
-cursor = conn.cursor()
-cursor.execute('''
-CREATE TABLE IF NOT EXISTS users (
-    user_id INTEGER PRIMARY KEY,
-    ref TEXT,
-    vpn_key TEXT,
-    paid INTEGER DEFAULT 0,
-    plan TEXT,
-    payment_time TEXT
-)
-''')
-conn.commit()
+DB_PATH = "fastvpn_users.db"
 
-# Генерация уникального VPN ключа
+# ------------------------
+# Работа с базой данных
+# ------------------------
+
+async def db_init():
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute('''CREATE TABLE IF NOT EXISTS users (
+            user_id INTEGER PRIMARY KEY,
+            username TEXT,
+            ref TEXT,
+            paid INTEGER DEFAULT 0,
+            plan TEXT,
+            payment_time TEXT,
+            vpn_key TEXT
+        )''')
+        await db.commit()
+
+async def add_user(user_id: int, username: str, ref: str = None):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "INSERT OR IGNORE INTO users (user_id, username, ref) VALUES (?, ?, ?)",
+            (user_id, username, ref)
+        )
+        await db.commit()
+
+async def set_user_plan(user_id: int, plan: str):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("UPDATE users SET plan = ? WHERE user_id = ?", (plan, user_id))
+        await db.commit()
+
+async def set_user_paid(user_id: int, paid: bool):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("UPDATE users SET paid = ? WHERE user_id = ?", (1 if paid else 0, user_id))
+        await db.commit()
+
+async def set_payment_time(user_id: int, payment_time: datetime):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("UPDATE users SET payment_time = ? WHERE user_id = ?", (payment_time.isoformat(), user_id))
+        await db.commit()
+
+async def set_vpn_key(user_id: int, key: str):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("UPDATE users SET vpn_key = ? WHERE user_id = ?", (key, user_id))
+        await db.commit()
+
+async def get_user(user_id: int):
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute("SELECT user_id, username, ref, paid, plan, payment_time, vpn_key FROM users WHERE user_id = ?", (user_id,))
+        row = await cursor.fetchone()
+        return row
+
+async def get_all_paid_users():
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute("SELECT user_id, username, plan, payment_time FROM users WHERE paid = 1")
+        rows = await cursor.fetchall()
+        return rows
+
+# ------------------------
+# Вспомогательные функции
+# ------------------------
+
 def generate_vpn_key():
     return ''.join(random.choices(string.ascii_letters + string.digits, k=32))
 
-# Добавление или обновление пользователя в базе
-def upsert_user(user_id, ref=None, paid=0, plan=None, payment_time=None, vpn_key=None):
-    cursor.execute("SELECT user_id FROM users WHERE user_id = ?", (user_id,))
-    if cursor.fetchone() is None:
-        cursor.execute(
-            "INSERT INTO users (user_id, ref, paid, plan, payment_time, vpn_key) VALUES (?, ?, ?, ?, ?, ?)",
-            (user_id, ref, paid, plan, payment_time, vpn_key)
-        )
-    else:
-        cursor.execute(
-            "UPDATE users SET ref = ?, paid = ?, plan = ?, payment_time = ?, vpn_key = ? WHERE user_id = ?",
-            (ref, paid, plan, payment_time, vpn_key, user_id)
-        )
-    conn.commit()
-
-# Получение данных пользователя
-def get_user(user_id):
-    cursor.execute("SELECT user_id, ref, vpn_key, paid, plan, payment_time FROM users WHERE user_id = ?", (user_id,))
-    row = cursor.fetchone()
-    if row:
-        return {
-            "user_id": row[0],
-            "ref": row[1],
-            "vpn_key": row[2],
-            "paid": bool(row[3]),
-            "plan": row[4],
-            "payment_time": datetime.fromisoformat(row[5]) if row[5] else None
-        }
-    else:
-        return None
-
-# Проверка активности подписки
-def is_subscription_active(user_data):
-    if not user_data or not user_data["paid"] or not user_data["payment_time"] or not user_data["plan"]:
-        return False
-    plan_days = TARIFFS[user_data["plan"]]["days"]
-    expiry_date = user_data["payment_time"] + timedelta(days=plan_days)
-    return datetime.now() < expiry_date
-
-# Формирование приветственного сообщения
 def get_welcome_text(user: types.User):
     ref_link = f"https://t.me/FastVpn_bot_bot?start={user.id}"
     return (
@@ -111,7 +119,6 @@ def get_welcome_text(user: types.User):
         f"🎉 Добро пожаловать в FastVPN! Безопасность и свобода интернета с тобой! 🌟"
     )
 
-# Клавиатура главного меню
 def main_menu_keyboard():
     kb = InlineKeyboardMarkup(row_width=1)
     for key, t in TARIFFS.items():
@@ -120,52 +127,37 @@ def main_menu_keyboard():
     kb.add(InlineKeyboardButton(text="🤖 Скачать для Android", url="https://play.google.com/store/apps/details?id=org.outline.android.client"))
     return kb
 
-# Кнопка "Оплатил(а)"
 def paid_button():
     kb = InlineKeyboardMarkup()
     kb.add(InlineKeyboardButton(text="✅ Оплатил(а)", callback_data="paid"))
     return kb
 
-# Кнопка подтверждения для админа
 def admin_confirm_button(user_id):
     kb = InlineKeyboardMarkup()
     kb.add(InlineKeyboardButton(text="✅ Подтвердить оплату", callback_data=f"confirm_{user_id}"))
     return kb
 
-# /start команда
+# ------------------------
+# Хэндлеры
+# ------------------------
+
 @dp.message_handler(commands=['start'])
 async def send_welcome(message: types.Message):
     user = message.from_user
     ref_id = message.get_args() if message.get_args() else None
-
-    existing_user = get_user(user.id)
-    if existing_user is None:
-        upsert_user(user.id, ref=ref_id)
-    else:
-        # Обновим реферальный ID, если пришёл с ссылкой
-        if ref_id and existing_user["ref"] is None:
-            upsert_user(user.id, ref=ref_id, paid=existing_user["paid"], plan=existing_user["plan"],
-                        payment_time=existing_user["payment_time"].isoformat() if existing_user["payment_time"] else None,
-                        vpn_key=existing_user["vpn_key"])
-
+    await add_user(user.id, user.username or "", ref_id)
     text = get_welcome_text(user)
     await message.answer(text, parse_mode='HTML', disable_web_page_preview=True, reply_markup=main_menu_keyboard())
 
-# Выбор тарифа
 @dp.callback_query_handler(lambda c: c.data and c.data.startswith('tariff_'))
 async def process_tariff(callback_query: types.CallbackQuery):
     tariff_key = callback_query.data[len("tariff_"):]
     if tariff_key not in TARIFFS:
         await callback_query.answer("Выбран неверный тариф.")
         return
-
-    user_data = get_user(callback_query.from_user.id)
-    if user_data and user_data["paid"]:
-        await callback_query.answer("У вас уже есть активная подписка.")
-        return
-
     tariff = TARIFFS[tariff_key]
-    upsert_user(callback_query.from_user.id, plan=tariff_key, paid=0, payment_time=None, vpn_key=None)
+    user_id = callback_query.from_user.id
+    await set_user_plan(user_id, tariff_key)
     text = (
         f"Вы выбрали тариф: <b>{tariff['name']}</b> за <b>{tariff['price']}₽</b>.\n\n"
         f"💳 Для оплаты переведите деньги на реквизиты:\n"
@@ -175,35 +167,12 @@ async def process_tariff(callback_query: types.CallbackQuery):
     await callback_query.message.edit_text(text, parse_mode='HTML', reply_markup=paid_button())
     await callback_query.answer()
 
-# Пользователь нажал "Оплатил(а)"
 @dp.callback_query_handler(lambda c: c.data == "paid")
 async def process_paid(callback_query: types.CallbackQuery):
-    user_data = get_user(callback_query.from_user.id)
-    if not user_data or not user_data.get("plan"):
+    user_id = callback_query.from_user.id
+    user_data = await get_user(user_id)
+    if not user_data or not user_data[4]:  # plan
         await callback_query.answer("Сначала выберите тариф.")
         return
-
-    if user_data["paid"]:
-        await callback_query.answer("У вас уже оплачена подписка.")
-        return
-
-    # Уведомление админу о том, что пользователь оплатил
-    plan_name = TARIFFS[user_data["plan"]]["name"]
-    time_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    msg = (
-        f"🔔 Пользователь @{callback_query.from_user.username or user_data['user_id']} "
-        f"(ID: {user_data['user_id']}) заявил об оплате.\n"
-        f"Тариф: {plan_name}\n"
-        f"Время: {time_now}"
-    )
-    await bot.send_message(ADMIN_ID, msg, reply_markup=admin_confirm_button(user_data['user_id']))
-    await callback_query.answer("Ваш запрос на оплату отправлен администратору. Ожидайте подтверждения.")
-
-# Админ подтвердил оплату
-@dp.callback_query_handler(lambda c: c.data and c.data.startswith("confirm_"))
-async def process_admin_confirm(callback_query: types.CallbackQuery):
-    if callback_query.from_user.id != ADMIN_ID:
-        await callback_query.answer("У вас нет прав подтверждать оплату.")
-        return
-
-    user_id = int(callback
+    if user_data[3] == 1:  # paid
+        await callback_query

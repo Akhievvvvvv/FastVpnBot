@@ -258,4 +258,10 @@ async def status(message: types.Message):
     free_days = user[7]
     free_days_expiry_str = user[8]
 
-    text = "📊 <b>Статус подписки:</b>\n"
+    text = (
+        "📊 <b>Статус подписки:</b>\n"
+        f"План: {plan or 'нет'}\n"
+        f"Оплачено: {'Да' if paid else 'Нет'}\n"
+        f"Окончание: {subscription_end_str or 'нет'}\n"
+        f"Бесплатные дни: {free_days or 0}\n"
+    )

@@ -258,4 +258,4 @@ async def status(message: types.Message):
     free_days = user[7]
     free_days_expiry_str = user[8]
 
-    text = "📊 <b>Статус подписки:</b
+    text = "📊 <b>Статус подписки:</b"

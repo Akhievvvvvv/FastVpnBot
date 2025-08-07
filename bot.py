@@ -1,15 +1,17 @@
+print("✅ Бот запущен!")
+
 import logging
+logging.basicConfig(level=logging.INFO)
+
 import asyncio
-import subprocess
+import secrets
 from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, types
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InputFile
 from aiogram.utils import executor
-import sqlite3
-import os
+import subprocess
 
 API_TOKEN = '8484443635:AAGpJkY1qDtfDFmvsh-cbu6CIYqC8cfVTD8'
-
 SERVER_PUBLIC_KEY = 'D4na0QwqCtqZatcyavT95NmLITuEaCjsnS9yl0mymUA='
 SERVER_IP = '109.196.100.159'
 SERVER_PORT = 51820
@@ -17,8 +19,6 @@ SERVER_INTERFACE = 'wg0'
 
 ADMIN_GROUP_ID = -1002593269045
 BOT_USERNAME = 'FastVpn_bot_bot'
-
-logging.basicConfig(level=logging.INFO)
 
 bot = Bot(token=API_TOKEN, parse_mode='HTML')
 dp = Dispatcher(bot)
@@ -29,69 +29,9 @@ TARIFFS = {
     "5": {"name": "5 месяцев", "price": 449, "days": 150}
 }
 
+issued_clients = {}  # user_id: {данные}
+last_assigned_ip = 2
 REF_PREFIX = "ref_"
-
-DB_PATH = 'vpn_users.db'
-
-# Инициализация базы
-def init_db():
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute('''
-      CREATE TABLE IF NOT EXISTS users (
-        user_id INTEGER PRIMARY KEY,
-        private_key TEXT,
-        public_key TEXT,
-        ip TEXT,
-        tariff TEXT,
-        subscription_expire TEXT,
-        paid INTEGER,
-        ref_from INTEGER
-      )
-    ''')
-    conn.commit()
-    conn.close()
-
-def db_execute(query, args=(), fetch=False):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute(query, args)
-    data = None
-    if fetch:
-        data = c.fetchone()
-    conn.commit()
-    conn.close()
-    return data
-
-def db_fetchall(query, args=()):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute(query, args)
-    data = c.fetchall()
-    conn.commit()
-    conn.close()
-    return data
-
-def get_user(user_id):
-    row = db_execute("SELECT * FROM users WHERE user_id=?", (user_id,), fetch=True)
-    if not row:
-        return None
-    keys = ['user_id', 'private_key', 'public_key', 'ip', 'tariff', 'subscription_expire', 'paid', 'ref_from']
-    user = dict(zip(keys, row))
-    if user['subscription_expire']:
-        user['subscription_expire'] = datetime.fromisoformat(user['subscription_expire'])
-    else:
-        user['subscription_expire'] = None
-    user['paid'] = bool(user['paid'])
-    return user
-
-def save_user(user):
-    sub_expire_str = user['subscription_expire'].isoformat() if user['subscription_expire'] else None
-    paid_int = 1 if user.get('paid') else 0
-    db_execute('''
-      INSERT OR REPLACE INTO users (user_id, private_key, public_key, ip, tariff, subscription_expire, paid, ref_from)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    ''', (user['user_id'], user['private_key'], user['public_key'], user['ip'], user['tariff'], sub_expire_str, paid_int, user['ref_from']))
 
 def generate_private_key():
     result = subprocess.run(['wg', 'genkey'], capture_output=True, text=True)
@@ -102,17 +42,11 @@ def generate_public_key(private_key):
     pubkey, _ = process.communicate(input=private_key)
     return pubkey.strip()
 
-def get_all_assigned_ips():
-    rows = db_fetchall("SELECT ip FROM users WHERE ip IS NOT NULL")
-    return set(row[0] for row in rows)
-
 def generate_client_ip():
-    assigned_ips = get_all_assigned_ips()
-    for last_octet in range(2, 255):
-        ip = f"10.0.0.{last_octet}"
-        if ip not in assigned_ips:
-            return ip
-    raise Exception("IP addresses exhausted!")
+    global last_assigned_ip
+    ip = f"10.0.0.{last_assigned_ip}"
+    last_assigned_ip += 1
+    return ip
 
 def generate_wg_config(private_key, client_ip):
     return f"""[Interface]
@@ -149,27 +83,22 @@ def payment_keyboard():
 @dp.message_handler(commands=['start'])
 async def start(message: types.Message):
     user_id = message.from_user.id
-    args = message.get_args()
     ref = None
+    args = message.get_args()
     if args.startswith(REF_PREFIX):
         try:
             ref = int(args[len(REF_PREFIX):])
         except:
             ref = None
-    user = get_user(user_id)
-    if not user:
-        user = {
-            'user_id': user_id,
-            'private_key': None,
-            'public_key': None,
-            'ip': None,
-            'tariff': None,
-            'subscription_expire': None,
-            'paid': False,
-            'ref_from': ref
+    if user_id not in issued_clients:
+        issued_clients[user_id] = {
+            "ref_from": ref,
+            "paid": False,
+            "private_key": None,
+            "ip": None,
+            "tariff": None,
+            "subscription_expire": None
         }
-        save_user(user)
-
     welcome = (
         "👋 <b>Привет!</b> Добро пожаловать в FastVPN! 🔐\n\n"
         "📲 Установи <b>WireGuard</b>:\n"
@@ -187,15 +116,9 @@ async def show_tariffs(message: types.Message):
 @dp.message_handler(lambda m: any(m.text == f"{v['name']} — {v['price']}₽" for v in TARIFFS.values()))
 async def selected_tariff(message: types.Message):
     user_id = message.from_user.id
-    user = get_user(user_id)
-    if not user:
-        await message.answer("❗ Произошла ошибка, попробуй /start")
-        return
     for key, val in TARIFFS.items():
         if message.text == f"{val['name']} — {val['price']}₽":
-            user['tariff'] = key
-            user['paid'] = False
-            save_user(user)
+            issued_clients[user_id]['tariff'] = key
             break
     await message.answer(
         f"💰 Реквизиты для оплаты:\n\n"
@@ -209,22 +132,20 @@ async def selected_tariff(message: types.Message):
 @dp.message_handler(lambda m: m.text == "✅ Я оплатил(а)")
 async def payment_confirmed(message: types.Message):
     user_id = message.from_user.id
-    user = get_user(user_id)
-    if not user or not user.get("tariff"):
+    client = issued_clients.get(user_id)
+    if not client or not client.get("tariff"):
         await message.answer("❗ Сначала выбери тариф.")
         return
-    if user["paid"]:
+    if client["paid"]:
         await message.answer("⏳ Уже жду подтверждение от администратора.")
         return
-    user["paid"] = True
-    save_user(user)
-
-    tariff = TARIFFS[user["tariff"]]
+    client["paid"] = True
+    tariff = TARIFFS[client["tariff"]]
     confirm_button = types.InlineKeyboardMarkup()
     confirm_button.add(types.InlineKeyboardButton("✅ Подтвердить", callback_data=f"confirm_{user_id}"))
     msg = (
         f"💸 <b>Новый платёж:</b>\n\n"
-        f"👤 Пользователь: @{message.from_user.username if message.from_user.username else 'не указан'}\n"
+        f"👤 Пользователь: @{message.from_user.username}\n"
         f"🆔 ID: {user_id}\n"
         f"📦 Тариф: {tariff['name']} — {tariff['price']}₽\n"
         f"⏰ Время: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
@@ -232,10 +153,84 @@ async def payment_confirmed(message: types.Message):
     await bot.send_message(ADMIN_GROUP_ID, msg, reply_markup=confirm_button)
     await message.answer("🕐 Оплата зафиксирована! Жди подтверждения 👀", reply_markup=main_menu())
 
-def add_peer_to_wg(public_key, client_ip):
-    # Добавляем пир в WireGuard
+@dp.callback_query_handler(lambda c: c.data and c.data.startswith("confirm_"))
+async def admin_confirm_callback(call: types.CallbackQuery):
+    if call.message.chat.id != ADMIN_GROUP_ID:
+        await call.answer("❌ Нет доступа")
+        return
     try:
-        subprocess.run(['wg', 'set', SERVER_INTERFACE, 'peer', public_key, 'allowed-ips', f"{client_ip}/32"], check=True)
-        return True
-    except Exception as e:
-        logging.error(f"Ошибка добавления пира в wg
+        user_id = int(call.data.split("_")[1])
+    except:
+        await call.answer("❌ Ошибка в ID")
+        return
+    client = issued_clients.get(user_id)
+    if not client or not client["paid"]:
+        await call.answer("⚠️ Невозможно подтвердить — нет данных.")
+        return
+
+    # Генерация ключей и IP
+    client["private_key"] = generate_private_key()
+    client["ip"] = generate_client_ip()
+    days = TARIFFS[client["tariff"]]["days"]
+
+    # Бонус за реферала
+    bonus_days = 0
+    referrer_id = client.get("ref_from")
+    if referrer_id and referrer_id in issued_clients:
+        issued_clients[referrer_id].setdefault("subscription_expire", datetime.now())
+        if issued_clients[referrer_id]["subscription_expire"] < datetime.now():
+            issued_clients[referrer_id]["subscription_expire"] = datetime.now()
+        issued_clients[referrer_id]["subscription_expire"] += timedelta(days=7)
+        bonus_days = 7
+
+    client["subscription_expire"] = datetime.now() + timedelta(days=days)
+    client["paid"] = False
+
+    config_text = generate_wg_config(client["private_key"], client["ip"])
+    filename = f"wg_{user_id}.conf"
+    with open(filename, "w") as f:
+        f.write(config_text)
+
+    await bot.send_document(user_id, InputFile(filename), caption=(
+        "✅ Оплата подтверждена!\n\n"
+        "📁 Ниже твой конфиг для WireGuard.\n"
+        "🔌 Просто открой его в приложении и включи VPN.\n\n"
+        "📲 Android: https://play.google.com/store/apps/details?id=com.wireguard.android\n"
+        "🍏 iOS: https://apps.apple.com/app/wireguard/id1441195209\n\n"
+        "🔥 Приятного пользования!" + (f"\n\n🎉 Твой реферер получил бонус +7 дней!" if bonus_days else "")
+    ))
+    await call.message.edit_reply_markup(None)
+    await call.answer("✅ Подтверждено и конфиг выдан!")
+
+@dp.message_handler(lambda m: m.text == "🎁 Реферальная система")
+async def referral_system(message: types.Message):
+    ref_link = f"https://t.me/{BOT_USERNAME}?start=ref_{message.from_user.id}"
+    await message.answer(
+        f"🎁 <b>Пригласи друзей и получи +7 дней!</b>\n\n"
+        f"📨 Твоя ссылка:\n<code>{ref_link}</code>\n\n"
+        f"Если кто-то оплатит по ней, ты получишь бонус 🎉"
+    )
+
+async def remind_expiration():
+    while True:
+        now = datetime.now()
+        for user_id, client in issued_clients.items():
+            expire = client.get("subscription_expire")
+            if expire:
+                days_left = (expire - now).days
+                if days_left == 3:
+                    try:
+                        await bot.send_message(user_id,
+                            "⏰ <b>Напоминание!</b>\n"
+                            "Через 3 дня заканчивается твоя подписка на FastVPN.\n"
+                            "Не забудь продлить, чтобы не потерять доступ! 🔐"
+                        )
+                    except Exception as e:
+                        logging.warning(f"Не удалось отправить напоминание {user_id}: {e}")
+        await asyncio.sleep(3600)
+
+if __name__ == '__main__':
+    print("🚀 Бот запущен и ожидает команды...")
+    loop = asyncio.get_event_loop()
+    loop.create_task(remind_expiration())
+    executor.start_polling(dp, skip_updates=True)

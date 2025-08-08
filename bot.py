@@ -239,3 +239,8 @@ async def admin_confirm_payment(callback_query: types.CallbackQuery, callback_da
 
     # Уведомляем админа
     await      bot.send_message(admin_id, f"✅ Ключ для пользователя {user_id} успешно создан и отправлен.")                      
+
+if __name__ == "__main__":
+    import asyncio
+    from aiogram import executor
+    executor.start_polling(dp, skip_updates=True)

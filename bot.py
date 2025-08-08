@@ -288,13 +288,13 @@ async def cb_show_referral(call: types.CallbackQuery):
 
 # --- Запуск бота ---
 
-import asyncio
+from aiogram import executor
 
 async def main():
     await init_db()
     logging.info("Бот запущен")
-    from aiogram import executor
-    executor.start_polling(dp)
+    await dp.start_polling()
 
 if __name__ == "__main__":
+    import asyncio
     asyncio.run(main())

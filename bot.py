@@ -1,387 +1,277 @@
-# bot.py
+from aiogram import Bot, Dispatcher, types
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.utils import executor
+from aiogram.utils.callback_data import CallbackData
+import asyncio
 import logging
 import random
 import string
-import asyncio
 from datetime import datetime, timedelta
 
-from aiogram import Bot, Dispatcher, types
-from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
-from aiogram.utils import executor
-import aiosqlite
+API_TOKEN = '8484443635:AAGpJkY1qDtfDFmvsh-cbu6CIYqC8cfVTD8'
 
-# ---------------- CONFIG ----------------
-API_TOKEN = '8484443635:AAGpJkY1qDtfDFmvsh-cbu6CIYqC8cfVTD8'  # <- вставьте ваш токен
-ADMIN_ID = 7231676236               # <- ваш юзер id (тот, кто подтверждает оплаты)
-ADMIN_GROUP_ID = -1002593269045     # <- группа/чат куда приходят платежи (можно поставить ADMIN_ID для личных уведомлений)
-BOT_USERNAME = "FastVpn_bot_bot"    # <- имя бота (без @)
-DB_PATH = "fastvpn.db"
-# ----------------------------------------
+ADMIN_CHAT_ID = -1002593269045
+ADMIN_USER_ID = 7231676236
 
-logging.basicConfig(level=logging.INFO)
-bot = Bot(token=API_TOKEN, parse_mode='HTML')
+# Инициализация бота и диспетчера
+bot = Bot(token=API_TOKEN)
 dp = Dispatcher(bot)
+
+# CallbackData для тарифов и подтверждения
+buy_cb = CallbackData('buy', 'period')
+confirm_cb = CallbackData('confirm', 'user_id')
+
+# Структура данных для хранения пользователей (в реальном проекте лучше БД)
+users = {}  
+# users = {
+#   user_id: {
+#     'key': str,
+#     'subscription_end': datetime,
+#     'referrer': user_id or None,
+#     'ref_bonus_days': int,
+#     'ref_count': int,
+#   }
+# }
 
 # Тарифы
 TARIFFS = {
-    "1m": {"name": "1 месяц", "price": 99, "days": 30},
-    "3m": {"name": "3 месяца", "price": 249, "days": 90},
-    "5m": {"name": "5 месяцев", "price": 399, "days": 150}
+    '1m': {'months': 1, 'price': 99},
+    '3m': {'months': 3, 'price': 249},
+    '5m': {'months': 5, 'price': 399},
 }
 
-# ---------------- DB ----------------
-async def db_init():
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute('''CREATE TABLE IF NOT EXISTS users (
-            user_id INTEGER PRIMARY KEY,
-            username TEXT,
-            ref TEXT,
-            paid INTEGER DEFAULT 0,
-            plan TEXT,
-            payment_time TEXT,
-            vpn_key TEXT,
-            subscription_end TEXT
-        )''')
-        await db.commit()
+REKVIZITS = """
+💳 Оплата через:
++7 932 222 99 30 (Ozon Bank)
 
-async def add_user(user_id: int, username: str, ref: str = None):
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("INSERT OR IGNORE INTO users (user_id, username, ref) VALUES (?, ?, ?)",
-                         (user_id, username, ref))
-        await db.commit()
+После оплаты нажмите кнопку "Оплатил(а)" для подтверждения.
+"""
 
-async def set_user_plan(user_id: int, plan: str):
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("UPDATE users SET plan = ? WHERE user_id = ?", (plan, user_id))
-        await db.commit()
-
-async def set_user_paid_and_subscription(user_id: int, paid: bool, subscription_end: datetime, payment_time: datetime = None):
-    pt = payment_time.isoformat() if payment_time else None
-    se = subscription_end.isoformat() if subscription_end else None
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("UPDATE users SET paid = ?, payment_time = ?, subscription_end = ? WHERE user_id = ?",
-                         (1 if paid else 0, pt, se, user_id))
-        await db.commit()
-
-async def set_vpn_key(user_id: int, key: str):
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("UPDATE users SET vpn_key = ? WHERE user_id = ?", (key, user_id))
-        await db.commit()
-
-async def get_user(user_id: int):
-    async with aiosqlite.connect(DB_PATH) as db:
-        cur = await db.execute("SELECT user_id, username, ref, paid, plan, payment_time, vpn_key, subscription_end FROM users WHERE user_id = ?", (user_id,))
-        row = await cur.fetchone()
-        return row
-
-async def get_all_paid_users():
-    async with aiosqlite.connect(DB_PATH) as db:
-        cur = await db.execute("SELECT user_id, subscription_end FROM users WHERE paid = 1")
-        rows = await cur.fetchall()
-        return rows
-
-# ---------------- Helpers ----------------
+# Функция генерации уникального ключа VPN (пример)
 def generate_vpn_key():
-    return ''.join(random.choices(string.ascii_letters + string.digits, k=40))
+    return ''.join(random.choices(string.ascii_letters + string.digits, k=32))
 
-def pretty_dt(iso_str: str):
-    if not iso_str:
-        return "—"
-    try:
-        dt = datetime.fromisoformat(iso_str)
-        return dt.strftime("%Y-%m-%d %H:%M:%S UTC")
-    except:
-        return iso_str
-
+# Форматирование приветствия
 def welcome_text(user: types.User):
-    ref_link = f"https://t.me/{BOT_USERNAME}?start=ref_{user.id}"
-    return (
-        "╔══════════════════════════╗\n"
-        "✨👋 <b>Добро пожаловать в FastVPN!</b> 👋✨\n"
-        "╚══════════════════════════╝\n\n"
-        "<b>Почему FastVPN?</b>\n"
-        "🌐 Доступ к любым сайтам и приложениям\n"
-        "🔒 Конфиденциальность и шифрование\n"
-        "⚡ Быстрое и стабильное соединение\n"
-        "📱 Поддержка iOS и Android (инструкция внизу)\n\n"
-        "<b>Тарифы:</b>\n"
-        "🗓️ 1 месяц — 99₽\n"
-        "🗓️ 3 месяца — 249₽\n"
-        "🗓️ 5 месяцев — 399₽\n\n"
-        "<b>Реферальная программа:</b>\n"
-        "Приглашайте друзей — получите +7 дней, если друг перейдёт по вашей ссылке и оплатит тариф.\n"
-        f"Твоя реферальная ссылка:\n<a href='{ref_link}'>Пригласить друзей</a>\n\n"
-        "<b>Как начать:</b>\n"
-        "1️⃣ Нажмите тариф в меню\n"
-        "2️⃣ Оплатите по реквизитам\n"
-        "3️⃣ Нажмите «✅ Оплатил(а)» — админ проверит и подтвердит\n"
-        "4️⃣ Получите свой уникальный VPN-ключ и вставьте его в приложение\n\n"
-        "<b>Реквизиты:</b>\n+7 932 222 99 30 (Ozon Bank)\n\n"
-        "Если что-то непонятно — напишите сюда.\n"
-        "🎉 Спасибо, что выбрали FastVPN!"
+    text = (
+        f"👋 Привет, <b>{user.first_name}!</b>\n\n"
+        "✨ Я — <b>FastVPN Bot</b> — твой помощник для быстрого и удобного VPN!\n\n"
+        "Что ты получаешь:\n"
+        "🔒 Безопасный и приватный доступ в интернет\n"
+        "⚡ Высокая скорость и стабильность\n"
+        "📱 Работает на всех твоих устройствах через Outline\n"
+        "🎁 Бонусы за приглашённых друзей\n"
+        "💳 Простая оплата и моментальная активация\n\n"
+        "Выбери подходящий тариф и начни пользоваться VPN прямо сейчас!\n\n"
     )
+    return text
 
-def main_menu_kb():
+# Клавиатура тарифов
+def tariff_keyboard():
     kb = InlineKeyboardMarkup(row_width=1)
     for key, t in TARIFFS.items():
-        kb.add(InlineKeyboardButton(f"{t['name']} — {t['price']}₽", callback_data=f"tariff_{key}"))
-    kb.add(InlineKeyboardButton("📲 Скачать для iPhone", url="https://apps.apple.com/app/outline-vpn/id1356177741"))
-    kb.add(InlineKeyboardButton("🤖 Скачать для Android", url="https://play.google.com/store/apps/details?id=org.outline.android.client"))
-    kb.add(InlineKeyboardButton("👥 Реферальная программа", callback_data="ref_info"))
+        kb.insert(InlineKeyboardButton(
+            f"{t['months']} месяц(ев) — {t['price']}₽", callback_data=buy_cb.new(period=key)
+        ))
     return kb
 
-def paid_kb():
-    kb = InlineKeyboardMarkup()
-    kb.add(InlineKeyboardButton("✅ Оплатил(а)", callback_data="paid"))
+# Клавиатура оплаты
+def payment_keyboard():
+    kb = InlineKeyboardMarkup(row_width=1)
+    kb.insert(InlineKeyboardButton("💰 Оплатил(а)", callback_data="paid"))
     return kb
 
-def admin_confirm_kb(user_id: int):
-    kb = InlineKeyboardMarkup()
-    kb.add(InlineKeyboardButton("✅ Подтвердить оплату", callback_data=f"confirm_{user_id}"))
+# Клавиатура подтверждения оплаты (для админа)
+def admin_confirm_keyboard(user_id: int):
+    kb = InlineKeyboardMarkup(row_width=1)
+    kb.insert(InlineKeyboardButton("✅ Подтвердить оплату", callback_data=confirm_cb.new(user_id=user_id)))
     return kb
 
-# ---------------- Handlers ----------------
+# Клавиатура для "Посмотреть реквизиты"
+def view_rekvizit_keyboard():
+    kb = InlineKeyboardMarkup(row_width=1)
+    kb.insert(InlineKeyboardButton("👀 Посмотреть реквизиты", callback_data="view_rekvizit"))
+    return kb
 
+# Генерация реферальной ссылки
+def referral_link(user_id: int):
+    return f"https://t.me/FastVpn_bot_bot?start=ref{user_id}"
+
+# Обработка /start с поддержкой рефералов
 @dp.message_handler(commands=['start'])
-async def cmd_start(message: types.Message):
-    args = message.get_args() or ""
-    ref = None
-    if args.startswith("ref_"):
-        ref = args.split("ref_")[1]
-        # защитимся, чтобы пользователь не мог сам себя рефить
-        if ref == str(message.from_user.id):
-            ref = None
-    await add_user(message.from_user.id, message.from_user.username or "", ref)
-    await message.answer(welcome_text(message.from_user), disable_web_page_preview=True, reply_markup=main_menu_kb())
-
-@dp.callback_query_handler(lambda c: c.data == "ref_info")
-async def cb_ref_info(call: types.CallbackQuery):
-    user = call.from_user
-    ref_link = f"https://t.me/{BOT_USERNAME}?start=ref_{user.id}"
-    text = (
-        "👥 <b>Реферальная программа</b>\n\n"
-        "Приглашайте друзей по вашей уникальной ссылке. Как только приглашённый " 
-        "пользователь перейдёт по ссылке и оплатит любой тариф — вы получите +7 дней к подписке.\n\n"
-        f"Ваша ссылка: <a href='{ref_link}'>Пригласить</a>\n\n"
-        "П.С. Бонус даётся только после того, как приглашённый оплатит и админ подтвердит оплату."
-    )
-    await call.answer()
-    await call.message.answer(text, disable_web_page_preview=True)
-
-@dp.callback_query_handler(lambda c: c.data and c.data.startswith("tariff_"))
-async def cb_tariff(call: types.CallbackQuery):
-    key = call.data.split("tariff_")[1]
-    if key not in TARIFFS:
-        await call.answer("Неверный тариф.", show_alert=True)
-        return
-    t = TARIFFS[key]
-    await set_user_plan(call.from_user.id, key)
-    text = (
-        f"Вы выбрали: <b>{t['name']}</b>\nЦена: <b>{t['price']}₽</b>\n\n"
-        "💳 Переведите оплату на реквизиты ниже, затем нажмите кнопку «Оплатил(а)».\n\n"
-        "<b>Реквизиты:</b>\n+7 932 222 99 30 (Ozon Bank)\n\n"
-        "После подтверждения оплаты админ пришлёт вам ваш личный ключ."
-    )
-    await call.answer()
-    await call.message.edit_text(text, parse_mode='HTML', reply_markup=paid_kb())
-
-@dp.callback_query_handler(lambda c: c.data == "paid")
-async def cb_paid(call: types.CallbackQuery):
-    user = await get_user(call.from_user.id)
-    if not user or not user[4]:
-        await call.answer("Сначала выберите тариф.", show_alert=True)
-        return
-    plan_key = user[4]
-    t = TARIFFS.get(plan_key)
-    if not t:
-        await call.answer("Ошибка тарифа.", show_alert=True)
-        return
-
-    # Уведомление в админ-группу с кнопкой подтверждения
-    username = user[1] or f"{call.from_user.id}"
-    text = (f"💸 <b>Новый платёж — подтверждение требуется</b>\n\n"
-            f"👤 Пользователь: @{username} (ID: {call.from_user.id})\n"
-            f"📦 Тариф: {t['name']} — {t['price']}₽\n"
-            f"⏰ Время: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}")
-    try:
-        await bot.send_message(ADMIN_GROUP_ID, text, parse_mode='HTML', reply_markup=admin_confirm_kb(call.from_user.id))
-    except Exception:
-        # если отсылка в группу провалилась, высылать администратору личное сообщение
-        await bot.send_message(ADMIN_ID, text, parse_mode='HTML', reply_markup=admin_confirm_kb(call.from_user.id))
-    await call.answer("Запрос на проверку оплаты отправлен администратору.", show_alert=True)
-
-@dp.callback_query_handler(lambda c: c.data and c.data.startswith("confirm_"))
-async def cb_confirm(call: types.CallbackQuery):
-    # только админ может подтверждать
-    if call.from_user.id != ADMIN_ID:
-        await call.answer("У вас нет прав для этого.", show_alert=True)
-        return
-
-    try:
-        target_id = int(call.data.split("confirm_")[1])
-    except:
-        await call.answer("Неверный ID.", show_alert=True)
-        return
-
-    user = await get_user(target_id)
-    if not user:
-        await call.answer("Пользователь не найден.", show_alert=True)
-        return
-
-    plan_key = user[4]
-    if not plan_key or plan_key not in TARIFFS:
-        await call.answer("У пользователя не выбран тариф.", show_alert=True)
-        return
-    tariff = TARIFFS[plan_key]
-    now = datetime.utcnow()
-
-    # если у пользователя уже есть подписка — продлеваем от текущего конца, иначе от now
-    existing_end = None
-    if user[7]:
+async def start_handler(message: types.Message):
+    args = message.get_args()
+    referrer_id = None
+    if args and args.startswith('ref'):
         try:
-            existing_end = datetime.fromisoformat(user[7])
+            referrer_id = int(args[3:])
         except:
-            existing_end = None
-    if existing_end and existing_end > now:
-        new_end = existing_end + timedelta(days=tariff['days'])
-    else:
-        new_end = now + timedelta(days=tariff['days'])
-
-    # помечаем оплату и срок
-    await set_user_paid_and_subscription(target_id, True, new_end, payment_time=now)
-
-    # генерируем ключ, если нет
-    vpn_key = user[6] or generate_vpn_key()
-    await set_vpn_key(target_id, vpn_key)
-
-    # если у пользователя есть реферер — начисляем ему +7 дней
-    ref = user[2]  # строка
-    if ref:
-        try:
-            ref_id = int(ref)
-            # не даём самому себе бонус
-            if ref_id != target_id:
-                ref_user = await get_user(ref_id)
-                # рассчитаем новый конец у реферера
-                now2 = datetime.utcnow()
-                if ref_user and ref_user[7]:
-                    try:
-                        ref_existing_end = datetime.fromisoformat(ref_user[7])
-                    except:
-                        ref_existing_end = None
-                else:
-                    ref_existing_end = None
-                if ref_existing_end and ref_existing_end > now2:
-                    ref_new_end = ref_existing_end + timedelta(days=7)
-                else:
-                    ref_new_end = now2 + timedelta(days=7)
-                # применим и (если у реферера нет vpn_key) создадим
-                await set_user_paid_and_subscription(ref_id, True, ref_new_end, payment_time=ref_user[5] and datetime.fromisoformat(ref_user[5]) or now2)
-                if ref_user and not ref_user[6]:
-                    # сгенерируем ключ для реферера, чтобы он мог сразу пользоваться
-                    await set_vpn_key(ref_id, generate_vpn_key())
-                # оповестим реферера
-                try:
-                    await bot.send_message(ref_id, "🎉 Вы получили +7 дней бесплатного доступа за приглашённого друга! Проверьте /status.")
-                except Exception:
-                    pass
-        except Exception:
             pass
 
-    # отправляем пользователю ключ и инструкцию
-    try:
-        await bot.send_message(target_id,
-            f"✅ <b>Оплата подтверждена!</b>\n\n"
-            f"🔑 Ваш уникальный VPN-ключ:\n<code>{vpn_key}</code>\n\n"
-            "📲 Как использовать:\n"
-            "1) Установите приложение Outline (iOS / Android).\n"
-            "2) В приложении выберите добавить ключ/activate и вставьте этот ключ.\n"
-            "3) Включите VPN и пользуйтесь.\n\n"
-            f"⏳ Подписка активна до: <b>{new_end.strftime('%Y-%m-%d %H:%M:%S UTC')}</b>\n\n"
-            "Если возникнут вопросы — напишите в этот чат.")
-    except Exception:
-        await call.answer("Не удалось отправить ключ пользователю (возможно, он заблокировал бота).", show_alert=True)
-        # но всё равно подтверждаем
+    user_id = message.from_user.id
 
-    # уведомляем в админ-группе что подтверждено
-    try:
-        await bot.send_message(ADMIN_GROUP_ID, f"✅ Подтверждение выполнено для пользователя ID {target_id}. Подписка до {new_end.strftime('%Y-%m-%d %H:%M:%S UTC')}.")
-    except:
-        pass
+    if user_id not in users:
+        users[user_id] = {
+            'key': None,
+            'subscription_end': None,
+            'referrer': referrer_id if referrer_id != user_id else None,
+            'ref_bonus_days': 0,
+            'ref_count': 0,
+        }
 
-    await call.answer("Оплата подтверждена и ключ выслан пользователю.")
-    try:
-        # убираем кнопки у сообщения с подтверждением (если это нужно)
-        await call.message.edit_reply_markup(None)
-    except:
-        pass
+    text = welcome_text(message.from_user)
+    text += "\nВыберите тариф для оплаты:"
+    kb = tariff_keyboard()
 
-# /status
-@dp.message_handler(commands=['status'])
-async def cmd_status(message: types.Message):
-    user = await get_user(message.from_user.id)
-    if not user:
-        await message.reply("Вы не зарегистрированы. Отправьте /start, чтобы начать.")
+    # Покажем реферальную ссылку внизу
+    text += f"\n\n💡 Ваша реферальная ссылка:\n{referral_link(user_id)}\n" \
+            f"Приглашайте друзей и получайте +7 дней бонуса за каждого, кто оплатит тариф!"
+
+    await message.answer(text, reply_markup=kb)
+
+# Обработка выбора тарифа
+@dp.callback_query_handler(buy_cb.filter())
+async def buy_callback_handler(query: types.CallbackQuery, callback_data: dict):
+    period = callback_data['period']
+    tariff = TARIFFS.get(period)
+    if not tariff:
+        await query.answer("Неверный тариф", show_alert=True)
         return
-    paid = bool(user[3])
-    plan = user[4] or "—"
-    vpn_key = user[6] or "—"
-    sub_end = pretty_dt(user[7])
+
     text = (
-        "<b>📊 Статус подписки</b>\n\n"
-        f"План: <b>{plan}</b>\n"
-        f"Оплачено: <b>{'Да' if paid else 'Нет'}</b>\n"
-        f"Окончание подписки: <b>{sub_end}</b>\n\n"
-        f"🔑 Ваш ключ: <code>{vpn_key}</code>\n\n"
-        "Чтобы получить ключ после оплаты — дождитесь подтверждения администратора."
+        f"Вы выбрали тариф: <b>{tariff['months']} месяц(ев) — {tariff['price']}₽</b>\n\n"
+        f"{REKVIZITS}\n"
+        "После оплаты нажмите кнопку ниже для уведомления администратора."
     )
-    await message.reply(text)
+    await query.message.edit_text(text, reply_markup=payment_keyboard())
 
-# ---------------- Background tasks ----------------
+# Обработка нажатия "Оплатил(а)"
+@dp.callback_query_handler(text="paid")
+async def paid_callback_handler(query: types.CallbackQuery):
+    user_id = query.from_user.id
+    user = users.get(user_id)
+    if not user:
+        await query.answer("Пользователь не найден", show_alert=True)
+        return
 
-async def subscription_watcher():
-    await asyncio.sleep(5)  # короткая пауза при старте
+    # Отправляем в админ-группу сообщение для подтверждения
+    text = (
+        f"💰 Оплата от пользователя:\n"
+        f"👤 Username: @{query.from_user.username or 'нет'}\n"
+        f"🆔 User ID: {user_id}\n"
+        f"Дата/время: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+        f"Ссылка: [перейти к чату](tg://user?id={user_id})"
+    )
+    await bot.send_message(ADMIN_CHAT_ID, text, parse_mode='Markdown', reply_markup=admin_confirm_keyboard(user_id))
+    await query.answer("Администратор получил уведомление и скоро подтвердит оплату.", show_alert=True)
+
+# Подтверждение оплаты админом
+@dp.callback_query_handler(confirm_cb.filter())
+async def confirm_payment_handler(query: types.CallbackQuery, callback_data: dict):
+    admin_id = query.from_user.id
+    if admin_id != ADMIN_USER_ID:
+        await query.answer("Нет доступа", show_alert=True)
+        return
+
+    user_id = int(callback_data['user_id'])
+    user = users.get(user_id)
+    if not user:
+        await query.answer("Пользователь не найден", show_alert=True)
+        return
+
+    # Здесь нужно определить, какой тариф выбирал пользователь.
+    # Для простоты примера — поставим 1 месяц, в реальном проекте надо хранить выбор тарифа.
+    # Можно сделать, чтобы тариф сохранялся при выборе.
+
+    # Для улучшения — сохраним тариф при выборе
+    # Добавим тариф в users[user_id]['selected_tariff']
+
+    # Но сейчас попробуем просто добавить 30 дней (для теста)
+
+    # Для лучшей логики нужно хранить last_selected_tariff:
+    last_selected_tariff = user.get('selected_tariff')
+    if last_selected_tariff and last_selected_tariff in TARIFFS:
+        months = TARIFFS[last_selected_tariff]['months']
+    else:
+        # Если нет — 1 месяц по умолчанию
+        months = 1
+
+    now = datetime.now()
+    if user['subscription_end'] and user['subscription_end'] > now:
+        user['subscription_end'] += timedelta(days=30*months)
+    else:
+        user['subscription_end'] = now + timedelta(days=30*months)
+
+    # Генерируем ключ
+    key = generate_vpn_key()
+    user['key'] = key
+
+    # Если есть реферер — даём бонус
+    if user['referrer']:
+        ref_user = users.get(user['referrer'])
+        if ref_user:
+            ref_user['subscription_end'] = (ref_user['subscription_end'] if ref_user['subscription_end'] and ref_user['subscription_end'] > now else now) + timedelta(days=7)
+            ref_user['ref_bonus_days'] = ref_user.get('ref_bonus_days', 0) + 7
+            ref_user['ref_count'] = ref_user.get('ref_count', 0) + 1
+
+            # Можно уведомить реферера
+            await bot.send_message(user['referrer'],
+                                   f"🎉 Поздравляем! По вашей реферальной ссылке пользователь оплатил тариф. Вам добавлено +7 дней бонуса!")
+
+    # Отправляем пользователю ключ и инструкцию
+    instruction = (
+        f"🎉 <b>Оплата подтверждена!</b>\n\n"
+        f"🔑 Ваш уникальный ключ VPN:\n<code>{key}</code>\n\n"
+        "📌 Как использовать ключ:\n"
+        "1️⃣ Скачайте приложение Outline VPN на ваше устройство.\n"
+        "2️⃣ Нажмите 'Добавить сервер' и выберите 'Ввести ключ вручную'.\n"
+        "3️⃣ Вставьте данный ключ и подключитесь.\n\n"
+        f"⏳ Ваша подписка активна до: <b>{user['subscription_end'].strftime('%Y-%m-%d')}</b>\n"
+        "Спасибо, что выбрали FastVPN! Если будут вопросы — пишите сюда."
+    )
+    await bot.send_message(user_id, instruction, parse_mode='HTML')
+
+    await query.answer("Оплата подтверждена, ключ отправлен пользователю.")
+    await query.message.edit_reply_markup()  # убираем кнопку у админа
+
+# Сохраняем выбранный тариф при выборе
+@dp.callback_query_handler(buy_cb.filter())
+async def save_tariff_handler(query: types.CallbackQuery, callback_data: dict):
+    user_id = query.from_user.id
+    period = callback_data['period']
+    if user_id in users:
+        users[user_id]['selected_tariff'] = period
+    await buy_callback_handler(query, callback_data)
+
+# Обработка кнопки "Посмотреть реквизиты"
+@dp.callback_query_handler(text="view_rekvizit")
+async def view_rekvizit_handler(query: types.CallbackQuery):
+    await query.answer()
+    await query.message.answer(REKVIZITS)
+
+# Ежедневная проверка подписок и напоминаний (пример)
+async def subscription_checker():
     while True:
-        try:
-            rows = await get_all_paid_users()
-            now = datetime.utcnow()
-            for r in rows:
-                uid = r[0]
-                end_str = r[1]
-                if not end_str:
-                    continue
-                try:
-                    end = datetime.fromisoformat(end_str)
-                except:
-                    continue
-                days_left = (end - now).days
-                # уведомления за 3,2,1 день
-                if days_left in (3,2,1):
+        now = datetime.now()
+        for user_id, data in users.items():
+            if data['subscription_end']:
+                days_left = (data['subscription_end'] - now).days
+                if days_left in [3, 2, 1]:
                     try:
-                        await bot.send_message(uid, f"⏳ Ваша подписка истекает через {days_left} {'день' if days_left==1 else 'дня' if days_left in (2,3) else 'дней'}. Не забудьте продлить.")
-                    except:
+                        await bot.send_message(user_id, f"⏳ Ваша подписка истекает через {days_left} день(дней). Не забудьте продлить её!")
+                    except Exception:
                         pass
-                # если истекла
-                if end < now:
-                    async with aiosqlite.connect(DB_PATH) as db:
-                        await db.execute("UPDATE users SET paid = 0, plan = NULL, vpn_key = NULL, payment_time = NULL, subscription_end = NULL WHERE user_id = ?", (uid,))
-                        await db.commit()
+                elif days_left < 0:
                     try:
-                        await bot.send_message(uid, "⛔ Ваша подписка истекла. Вы потеряли доступ — чтобы возобновить, выберите тариф и оплатите снова.")
-                    except:
+                        await bot.send_message(user_id, "⚠️ Ваша подписка истекла. Чтобы продолжить пользоваться VPN, пожалуйста, оплатите тариф.")
+                    except Exception:
                         pass
-        except Exception as e:
-            logging.exception("Ошибка в subscription_watcher: %s", e)
-        # проверяем каждые 6 часов
-        await asyncio.sleep(60 * 60 * 6)
+        await asyncio.sleep(24 * 60 * 60)  # проверять раз в сутки
 
-# ---------------- Startup ----------------
+# Запуск проверок в фоне
 async def on_startup(dp):
-    await db_init()
-    # запустим фонового наблюдателя
-    loop = asyncio.get_event_loop()
-    loop.create_task(subscription_watcher())
-    logging.info("Бот запущен. База и фоновые задачи инициализированы.")
+    asyncio.create_task(subscription_checker())
 
-if __name__ == "__main__":
-    executor.start_polling(dp, skip_updates=True, on_startup=on_startup)
+if __name__ == '__main__':
+    logging.basicConfig(level=logging.INFO)
+    executor.start_polling(dp, on_startup=on_startup)

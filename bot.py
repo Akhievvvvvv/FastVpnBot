@@ -1,4 +1,4 @@
- import logging
+import logging
 import re
 import ssl
 import certifi
@@ -245,8 +245,13 @@ async def admin_confirm_payment(callback_query: types.CallbackQuery, callback_da
 if __name__ == "__main__":
     import asyncio
     from aiogram import executor
-    
-    # Инициализируем базу данных
+
+    # Инициализируем базу данных до запуска бота
     asyncio.run(init_db())
-    
-    executor.start_polling(dp, skip_updates=True)
+
+    # Создаем и устанавливаем новый event loop вручную
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
+    # Запускаем polling с указанным event loop
+    executor.start_polling(dp, skip_updates=True, loop=loop)

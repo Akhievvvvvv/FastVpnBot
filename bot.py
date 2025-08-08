@@ -242,12 +242,13 @@ async def admin_confirm_payment(callback_query: types.CallbackQuery, callback_da
     await bot.send_message(admin_id, f"✅ Ключ для пользователя {user_id} успешно создан и отправлен.")
 
 
+
 if __name__ == "__main__":
     import asyncio
     from aiogram import executor
 
-    async def main():
-        await init_db()  # инициализация базы данных
-        await executor.start_polling(dp, skip_updates=True)
-
-    asyncio.run(main())
+    # Инициализируем БД перед запуском
+    asyncio.get_event_loop().run_until_complete(init_db())
+    
+    # Запускаем бота
+    executor.start_polling(dp, skip_updates=True)

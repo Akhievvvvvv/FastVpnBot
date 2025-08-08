@@ -1,13 +1,13 @@
-import logging
-import requests
-import aiosqlite
-from aiogram import Bot, Dispatcher, executor, types
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-from aiogram.utils.callback_data import CallbackData
-import asyncio
+ import logging
 import re
 import ssl
 import certifi
+import aiohttp
+import aiosqlite
+from aiogram import Bot, Dispatcher, types
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.utils.callback_data import CallbackData
+from aiogram.utils import executor
 
 # ======== Твои данные ========
 API_TOKEN = "8484443635:AAGpJkY1qDtfDFmvsh-cbu6CIYqC8cfVTD8"
@@ -27,7 +27,7 @@ dp = Dispatcher(bot)
 # Для удобной обработки callback данных с user_id
 confirm_cb = CallbackData("confirm", "user_id")
 
-# SSL контекст для requests (Outline с самоподписанным cert)
+# SSL контекст для aiohttp (самоподписанный cert, отключаем проверку)
 ssl_context = ssl.create_default_context(cafile=certifi.where())
 ssl_context.check_hostname = False
 ssl_context.verify_mode = ssl.CERT_NONE
@@ -54,14 +54,14 @@ async def init_db():
 
 async def add_user(user_id: int, username: str, referrer: int = None):
     async with aiosqlite.connect(DATABASE) as db:
-        # Проверяем есть ли уже юзер
         cursor = await db.execute("SELECT user_id FROM users WHERE user_id = ?", (user_id,))
         res = await cursor.fetchone()
         if res is None:
-            # Добавляем нового юзера
-            await db.execute("INSERT INTO users(user_id, username, paid, key_config, referrer) VALUES (?, ?, 0, '', ?)", (user_id, username, referrer))
+            await db.execute(
+                "INSERT INTO users(user_id, username, paid, key_config, referrer) VALUES (?, ?, 0, '', ?)",
+                (user_id, username, referrer)
+            )
             if referrer:
-                # Добавляем реферальную связь
                 try:
                     await db.execute("INSERT INTO referrals(referrer, referee) VALUES (?, ?)", (referrer, user_id))
                 except aiosqlite.IntegrityError:
@@ -80,12 +80,15 @@ async def set_key(user_id: int, key_config: str):
 
 async def get_user(user_id: int):
     async with aiosqlite.connect(DATABASE) as db:
-        cursor = await db.execute("SELECT user_id, username, paid, key_config, referrer FROM users WHERE user_id = ?", (user_id,))
+        cursor = await db.execute(
+            "SELECT user_id, username, paid, key_config, referrer FROM users WHERE user_id = ?",
+            (user_id,)
+        )
         return await cursor.fetchone()
 
 # ========================================================
 
-# Создание ключа Outline через API
+# Создание ключа Outline через API (async)
 async def create_outline_access_key():
     url = f"{OUTLINE_API_URL}/access-keys"
     headers = {
@@ -97,13 +100,15 @@ async def create_outline_access_key():
         "accessUrl": None
     }
     try:
-        response = requests.post(url, headers=headers, json=payload, verify=False)
-        if response.status_code == 200:
-            data = response.json()
-            return data.get("accessUrl")
-        else:
-            logging.error(f"Outline API error: {response.status_code} {response.text}")
-            return None
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, json=payload, headers=headers, ssl=ssl_context) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    return data.get("accessUrl")
+                else:
+                    text = await resp.text()
+                    logging.error(f"Outline API error: {resp.status} {text}")
+                    return None
     except Exception as e:
         logging.error(f"Outline API request error: {e}")
         return None
@@ -129,7 +134,7 @@ INSTRUCTION_TEXT = (
     "Если будут вопросы — я всегда на связи! 😊"
 )
 
-# Главное меню
+# Главное меню с inline-кнопками
 def main_menu():
     kb = InlineKeyboardMarkup(row_width=1)
     kb.add(
@@ -140,6 +145,7 @@ def main_menu():
     return kb
 
 # Радостный ответ на любое сообщение, кроме команд
+@dp.message_handler(lambda message: not message.text.startswith('/'))
 async def cheerful_reply(message: types.Message):
     text = (
         f"🌈 Привет-привет, {message.from_user.first_name}! 😄\n\n"
@@ -157,7 +163,6 @@ async def cheerful_reply(message: types.Message):
 async def cmd_start(message: types.Message):
     user_id = message.from_user.id
     username = message.from_user.username or ""
-    # Парсим ref из /start ref=ID
     ref = None
     args = message.get_args()
     if args:
@@ -217,7 +222,6 @@ async def admin_confirm_payment(callback_query: types.CallbackQuery, callback_da
 
     await bot.answer_callback_query(callback_query.id, "✅ Оплата подтверждена, создаю ключ...")
 
-    # Создаем ключ
     key = await create_outline_access_key()
     if key is None:
         await bot.send_message(admin_id, f"❌ Не удалось создать ключ для пользователя {user_id}")
@@ -227,7 +231,6 @@ async def admin_confirm_payment(callback_query: types.CallbackQuery, callback_da
     await set_paid(user_id)
     await set_key(user_id, key)
 
-    # Отправляем ключ пользователю
     await bot.send_message(
         user_id,
         f"🎉 Поздравляем! Оплата подтверждена.\n\n"
@@ -237,10 +240,9 @@ async def admin_confirm_payment(callback_query: types.CallbackQuery, callback_da
         parse_mode="HTML"
     )
 
-    # Уведомляем админа
-    await      bot.send_message(admin_id, f"✅ Ключ для пользователя {user_id} успешно создан и отправлен.")                      
+    await bot.send_message(admin_id, f"✅ Ключ для пользователя {user_id} успешно создан и отправлен.")
 
 if __name__ == "__main__":
     import asyncio
-    from aiogram import executor
+    asyncio.run(init_db())  # Инициализируем базу перед запуском
     executor.start_polling(dp, skip_updates=True)

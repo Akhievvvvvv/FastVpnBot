@@ -7,7 +7,6 @@ import aiosqlite
 from aiogram import Bot, Dispatcher, types
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.utils.callback_data import CallbackData
-from aiogram.utils import executor
 
 # ======== Твои данные ========
 API_TOKEN = "8484443635:AAGpJkY1qDtfDFmvsh-cbu6CIYqC8cfVTD8"
@@ -242,12 +241,7 @@ async def admin_confirm_payment(callback_query: types.CallbackQuery, callback_da
 
     await bot.send_message(admin_id, f"✅ Ключ для пользователя {user_id} успешно создан и отправлен.")
 
+
 if __name__ == "__main__":
     import asyncio
     from aiogram import executor
-
-    async def main():
-        await init_db()  # если у тебя есть такая функция инициализации
-        await executor.start_polling(dp, skip_updates=True)
-
-    asyncio.run(main())

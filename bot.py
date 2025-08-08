@@ -246,12 +246,8 @@ if __name__ == "__main__":
     import asyncio
     from aiogram import executor
 
-    # Инициализируем базу данных до запуска бота
-    asyncio.run(init_db())
+    async def main():
+        await init_db()  # если у тебя есть такая функция инициализации
+        await executor.start_polling(dp, skip_updates=True)
 
-    # Создаем и устанавливаем новый event loop вручную
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-
-    # Запускаем polling с указанным event loop
-    executor.start_polling(dp, skip_updates=True, loop=loop)
+    asyncio.run(main())

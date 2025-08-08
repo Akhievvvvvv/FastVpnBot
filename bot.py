@@ -243,12 +243,13 @@ async def admin_confirm_payment(callback_query: types.CallbackQuery, callback_da
 
 
 
+
 if __name__ == "__main__":
     import asyncio
     from aiogram import executor
 
-    # Инициализируем БД перед запуском
-    asyncio.get_event_loop().run_until_complete(init_db())
-    
-    # Запускаем бота
+    # Инициализация базы данных (запускается один раз, синхронно)
+    asyncio.run(init_db())
+
+    # Запуск бота (без asyncio.run)
     executor.start_polling(dp, skip_updates=True)

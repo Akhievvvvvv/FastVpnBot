@@ -1,2 +1,5 @@
 # FastVpnBot
-VPN subscription
+
+## Как запустить
+
+1. Клонируйте репозиторий:

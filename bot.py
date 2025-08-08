@@ -245,3 +245,9 @@ async def admin_confirm_payment(callback_query: types.CallbackQuery, callback_da
 if __name__ == "__main__":
     import asyncio
     from aiogram import executor
+
+    async def main():
+        await init_db()  # инициализация базы данных
+        await executor.start_polling(dp, skip_updates=True)
+
+    asyncio.run(main())

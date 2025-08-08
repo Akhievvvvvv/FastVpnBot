@@ -23,15 +23,13 @@ logging.basicConfig(level=logging.INFO)
 bot = Bot(token=API_TOKEN)
 dp = Dispatcher(bot)
 
-# Для удобной обработки callback данных с user_id
 confirm_cb = CallbackData("confirm", "user_id")
 
-# SSL контекст для aiohttp (самоподписанный cert, отключаем проверку)
 ssl_context = ssl.create_default_context(cafile=certifi.where())
 ssl_context.check_hostname = False
 ssl_context.verify_mode = ssl.CERT_NONE
 
-# ===================== База данных =====================
+# База данных
 async def init_db():
     async with aiosqlite.connect(DATABASE) as db:
         await db.execute("""
@@ -85,9 +83,7 @@ async def get_user(user_id: int):
         )
         return await cursor.fetchone()
 
-# ========================================================
-
-# Создание ключа Outline через API (async)
+# Создание ключа Outline через API
 async def create_outline_access_key():
     url = f"{OUTLINE_API_URL}/access-keys"
     headers = {
@@ -112,7 +108,6 @@ async def create_outline_access_key():
         logging.error(f"Outline API request error: {e}")
         return None
 
-# Красочное приветствие
 WELCOME_TEXT = (
     "🎉 <b>Добро пожаловать в FastVpnBot!</b> 🎉\n\n"
     "✨ <b>Что я умею:</b> ✨\n"
@@ -133,7 +128,6 @@ INSTRUCTION_TEXT = (
     "Если будут вопросы — я всегда на связи! 😊"
 )
 
-# Главное меню с inline-кнопками
 def main_menu():
     kb = InlineKeyboardMarkup(row_width=1)
     kb.add(
@@ -143,7 +137,6 @@ def main_menu():
     )
     return kb
 
-# Радостный ответ на любое сообщение, кроме команд
 @dp.message_handler(lambda message: not message.text.startswith('/'))
 async def cheerful_reply(message: types.Message):
     text = (
@@ -157,7 +150,6 @@ async def cheerful_reply(message: types.Message):
     )
     await message.answer(text, reply_markup=main_menu(), parse_mode="HTML")
 
-# Обработка команды /start с реферальным кодом
 @dp.message_handler(commands=["start"])
 async def cmd_start(message: types.Message):
     user_id = message.from_user.id
@@ -169,7 +161,7 @@ async def cmd_start(message: types.Message):
         if m:
             ref = int(m.group(1))
             if ref == user_id:
-                ref = None  # Нельзя рефить себя
+                ref = None
 
     await add_user(user_id, username, ref)
 
@@ -241,15 +233,9 @@ async def admin_confirm_payment(callback_query: types.CallbackQuery, callback_da
 
     await bot.send_message(admin_id, f"✅ Ключ для пользователя {user_id} успешно создан и отправлен.")
 
-
-
-
 if __name__ == "__main__":
     import asyncio
     from aiogram import executor
 
-    # Инициализация базы данных (запускается один раз, синхронно)
     asyncio.run(init_db())
-
-    # Запуск бота (без asyncio.run)
     executor.start_polling(dp, skip_updates=True)

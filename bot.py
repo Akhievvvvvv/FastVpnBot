@@ -8,6 +8,7 @@ from aiogram import Bot, Dispatcher, types
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.utils.callback_data import CallbackData
 
+# --- Твои данные ---
 API_TOKEN = "8484443635:AAGpJkY1qDtfDFmvsh-cbu6CIYqC8cfVTD8"
 ADMIN_CHAT_ID = -1002593269045
 YOUR_USER_ID = 7231676236  # твой ID для подтверждения оплаты
@@ -23,11 +24,12 @@ dp = Dispatcher(bot)
 
 confirm_cb = CallbackData("confirm", "user_id", "tariff")
 
+# SSL для Outline API (с отключенной проверкой сертификата)
 ssl_context = ssl.create_default_context(cafile=certifi.where())
 ssl_context.check_hostname = False
 ssl_context.verify_mode = ssl.CERT_NONE
 
-# --- Работа с БД ---
+# --- Инициализация базы данных ---
 
 async def init_db():
     async with aiosqlite.connect(DATABASE) as db:
@@ -94,7 +96,7 @@ async def get_referral_stats(user_id: int):
         paid = (await cursor.fetchone())[0]
         return total, paid
 
-# --- Outline API ---
+# --- Функция создания ключа в Outline API ---
 
 async def create_outline_access_key():
     url = f"{OUTLINE_API_URL}/access-keys"
@@ -245,7 +247,6 @@ async def cb_admin_confirm(call: types.CallbackQuery):
         await call.answer("У вас нет прав на это действие.", show_alert=True)
         return
     user_id = int(call.data.split("_")[-1])
-    # Можно добавить здесь выбор тарифа, сейчас фиксируем
     await set_paid(user_id, "подписка")
     key = await create_outline_access_key()
     if key:
@@ -266,9 +267,13 @@ async def cb_show_rekvizity(call: types.CallbackQuery):
 @dp.callback_query_handler(lambda c: c.data == "instruction")
 async def cb_instruction(call: types.CallbackQuery):
     await call.answer()
-    await call.message.edit_text(INSTRUCTION_TEXT, reply_markup=InlineKeyboardMarkup().add(
-        InlineKeyboardButton("⬅️ Назад", callback_data="main_menu")
-    ), parse_mode="HTML")
+    await call.message.edit_text(
+        INSTRUCTION_TEXT,
+        reply_markup=InlineKeyboardMarkup().add(
+            InlineKeyboardButton("⬅️ Назад", callback_data="main_menu")
+        ),
+        parse_mode="HTML"
+    )
 
 @dp.callback_query_handler(lambda c: c.data == "show_referral")
 async def cb_show_referral(call: types.CallbackQuery):
@@ -282,11 +287,133 @@ async def cb_show_referral(call: types.CallbackQuery):
         f"👤 Всего перешло по ссылке: {total}\n"
         f"✅ Активировали подписку: {paid}"
     )
-    await call.message.edit_text(text, reply_markup=InlineKeyboardMarkup().add(
-        InlineKeyboardButton("⬅️ Назад", callback_data="main_menu")
-    ), parse_mode="HTML")
+    await call.message.edit_text(
+        text,
+        reply_markup=InlineKeyboardMarkup().add(
+            InlineKeyboardButton("⬅️ Назад", callback_data="main_menu")
+        ),
+        parse_mode="HTML"
+    )
 
-# --- Запуск бота ---
+@dp.callback_query_handler(lambda c: c.data == "show_rekvizity")
+async def cb_show_rekvizity(call: types.CallbackQuery):
+    await call.answer()
+    await call.message.edit_text(
+        REKVIZITY_TEXT,
+        reply_markup=InlineKeyboardMarkup().add(
+            InlineKeyboardButton("⬅️ Назад", callback_data="main_menu")
+        ),
+        parse_mode="HTML"
+    )
+
+@dp.callback_query_handler(lambda c: c.data == "main_menu")
+async def cb_main_menu(call: types.CallbackQuery):
+    await call.answer()
+    await call.message.edit_text(
+        WELCOME_TEXT,
+        reply_markup=main_menu(),
+        parse_mode="HTML"
+    )
+
+@dp.callback_query_handler(lambda c: c.data == "show_tariffs")
+async def cb_show_tariffs(call: types.CallbackQuery):
+    await call.answer()
+    kb = tariffs_menu(call.from_user.id)
+    await call.message.edit_text(
+        "📃 <b>Выберите тариф:</b>",
+        reply_markup=kb,
+        parse_mode="HTML"
+    )
+
+@dp.callback_query_handler(confirm_cb.filter())
+async def cb_confirm_payment(call: types.CallbackQuery, callback_data: dict):
+    user_id = int(callback_data["user_id"])
+    tariff = callback_data["tariff"]
+    if call.from_user.id != user_id:
+        await call.answer("Это не для вас!", show_alert=True)
+        return
+
+    kb = InlineKeyboardMarkup()
+    kb.add(InlineKeyboardButton("💳 Оплатил(а)", callback_data="paid"))
+    await call.message.edit_text(
+        f"Вы выбрали тариф: <b>{tariff}</b>\n\n{REKVIZITY_TEXT}",
+        reply_markup=kb,
+        parse_mode="HTML"
+    )
+
+@dp.callback_query_handler(lambda c: c.data == "paid")
+async def cb_paid(call: types.CallbackQuery):
+    user_id = call.from_user.id
+    await call.answer("Спасибо за оплату! Жду подтверждения от администратора.")
+    kb = InlineKeyboardMarkup()
+    kb.add(InlineKeyboardButton("✅ Подтвердить оплату", callback_data=f"admin_confirm_{user_id}"))
+    await bot.send_message(
+        ADMIN_CHAT_ID,
+        f"Пользователь @{call.from_user.username or user_id} (ID: {user_id}) оплатил подписку.",
+        reply_markup=kb
+    )
+
+@dp.callback_query_handler(lambda c: c.data and c.data.startswith("admin_confirm_"))
+async def cb_admin_confirm(call: types.CallbackQuery):
+    if call.from_user.id != YOUR_USER_ID:
+        await call.answer("У вас нет прав на это действие.", show_alert=True)
+        return
+    user_id = int(call.data.split("_")[-1])
+    await set_paid(user_id, "подписка")
+    key = await create_outline_access_key()
+    if key:
+        await set_key(user_id, key)
+        await bot.send_message(
+            user_id,
+            f"✅ Ваша подписка активирована!\n\nВот ваш VPN ключ для Outline:\n{key}"
+        )
+    else:
+        await bot.send_message(user_id, "❌ Ошибка при создании VPN ключа, свяжитесь с поддержкой.")
+    await call.answer("Оплата подтверждена и ключ отправлен пользователю.")
+    await call.message.edit_reply_markup()  # убираем кнопки
+
+@dp.message_handler(commands=["start"])
+async def cmd_start(message: types.Message):
+    user_id = message.from_user.id
+    username = message.from_user.username or ""
+    ref = None
+    args = message.get_args()
+    if args:
+        m = re.search(r"ref=(\d+)", args)
+        if m:
+            ref = int(m.group(1))
+            if ref == user_id:
+                ref = None
+
+    await add_user(user_id, username, ref)
+    await message.answer(
+        WELCOME_TEXT,
+        reply_markup=main_menu(),
+        parse_mode="HTML"
+    )
+
+@dp.message_handler(commands=["ref"])
+async def cmd_referral(message: types.Message):
+    user_id = message.from_user.id
+    total, paid = await get_referral_stats(user_id)
+    ref_link = f"https://t.me/FastVpn_bot_bot?start=ref={user_id}"
+    text = (
+        f"👥 <b>Ваша реферальная ссылка:</b>\n"
+        f"{ref_link}\n\n"
+        f"👤 Всего перешло по ссылке: {total}\n"
+        f"✅ Активировали подписку: {paid}"
+    )
+    await message.answer(text, parse_mode="HTML")
+
+@dp.message_handler(lambda m: m.text and not m.text.startswith('/'))
+async def any_message_reply(message: types.Message):
+    await message.answer(
+        f"Привет, {message.from_user.first_name}! Используй кнопки ниже, чтобы управлять VPN:",
+        reply_markup=main_menu(),
+        parse_mode="HTML"
+    )
+
+# Запуск бота
 
 from aiogram import executor
 

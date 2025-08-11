@@ -1,48 +1,81 @@
+#!/usr/bin/env python3
+# bot.py — FastVpnBot (complete)
 import logging
-import re
+import asyncio
 import ssl
+import json
+from datetime import datetime, timedelta
+
 import certifi
 import aiohttp
 import aiosqlite
 from aiogram import Bot, Dispatcher, types
+from aiogram.utils import executor
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-from aiogram.utils.callback_data import CallbackData
 
-# --- Твои данные ---
+# ================= CONFIG =================
 API_TOKEN = "8484443635:AAGpJkY1qDtfDFmvsh-cbu6CIYqC8cfVTD8"
 ADMIN_CHAT_ID = -1002593269045
-YOUR_USER_ID = 7231676236  # твой ID для подтверждения оплаты
+ADMIN_USER_ID = 7231676236   # твой ID для подтверждения оплат (через callback/button)
+BOT_USERNAME = "FastVpn_bot_bot"
 
 OUTLINE_API_URL = "https://109.196.100.159:7235/gip-npAdi0GP2xswd_f9Nw"
 OUTLINE_CERT_SHA256 = "2065D8741DB5F2DD3E9A4C6764F55ECAD1B76FBADC33E1FAF7AD1A21AC163131"
 
 DATABASE = "fastvpn_bot.db"
 
+# Тарифы (ключи для БД/логики)
+TARIFFS = {
+    "1m": {"name": "1 месяц", "price": 99,  "days": 30},
+    "3m": {"name": "3 месяца", "price": 149, "days": 90},
+    "5m": {"name": "5 месяцев", "price": 399, "days": 150},
+}
+
+REKVIZITES = "+7 932 222 99 30 (Ozon Bank)"
+
+# ==========================================
+
 logging.basicConfig(level=logging.INFO)
-bot = Bot(token=API_TOKEN)
+logger = logging.getLogger(__name__)
+
+bot = Bot(token=API_TOKEN, parse_mode="HTML")
 dp = Dispatcher(bot)
 
-confirm_cb = CallbackData("confirm", "user_id", "tariff")
-
-# SSL для Outline API (с отключенной проверкой сертификата)
+# SSL for Outline API (disable strict verification because server uses custom cert)
 ssl_context = ssl.create_default_context(cafile=certifi.where())
 ssl_context.check_hostname = False
 ssl_context.verify_mode = ssl.CERT_NONE
 
-# --- Инициализация базы данных ---
+# ----------------- Database -----------------
 
 async def init_db():
     async with aiosqlite.connect(DATABASE) as db:
+        # users: user_id, username, referrer, subscription_end, outline_key_id, outline_access_url
         await db.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 user_id INTEGER PRIMARY KEY,
                 username TEXT,
-                paid INTEGER DEFAULT 0,
-                key_config TEXT,
                 referrer INTEGER,
-                tariff TEXT DEFAULT ''
+                subscription_end TEXT,
+                outline_key_id TEXT,
+                outline_access_url TEXT
             )
         """)
+        # payments: history and pending payments
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS payments (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                tariff_key TEXT,
+                amount INTEGER,
+                status TEXT, -- pending, confirmed, canceled
+                created_at TEXT,
+                confirmed_at TEXT,
+                outline_key_id TEXT,
+                outline_access_url TEXT
+            )
+        """)
+        # referrals table to store who referred whom (avoid duplicates)
         await db.execute("""
             CREATE TABLE IF NOT EXISTS referrals (
                 referrer INTEGER,
@@ -50,378 +83,477 @@ async def init_db():
             )
         """)
         await db.commit()
+    logger.info("Initialized DB")
 
-async def add_user(user_id: int, username: str, referrer: int = None):
+# helper DB operations
+async def add_user_to_db(user_id: int, username: str = "", ref: int | None = None):
     async with aiosqlite.connect(DATABASE) as db:
-        cursor = await db.execute("SELECT user_id FROM users WHERE user_id = ?", (user_id,))
-        res = await cursor.fetchone()
-        if res is None:
-            await db.execute(
-                "INSERT INTO users(user_id, username, paid, key_config, referrer) VALUES (?, ?, 0, '', ?)",
-                (user_id, username, referrer)
-            )
-            if referrer and referrer != user_id:
-                try:
-                    await db.execute("INSERT INTO referrals(referrer, referee) VALUES (?, ?)", (referrer, user_id))
-                except aiosqlite.IntegrityError:
-                    pass
-            await db.commit()
-
-async def set_paid(user_id: int, tariff: str):
-    async with aiosqlite.connect(DATABASE) as db:
-        await db.execute("UPDATE users SET paid = 1, tariff = ? WHERE user_id = ?", (tariff, user_id))
+        await db.execute("INSERT OR IGNORE INTO users(user_id, username, referrer) VALUES (?, ?, ?)",
+                         (user_id, username or "", ref))
+        if ref and ref != user_id:
+            try:
+                await db.execute("INSERT OR IGNORE INTO referrals(referrer, referee) VALUES (?, ?)", (ref, user_id))
+            except Exception:
+                pass
         await db.commit()
 
-async def set_key(user_id: int, key_config: str):
+async def get_user_row(user_id: int):
     async with aiosqlite.connect(DATABASE) as db:
-        await db.execute("UPDATE users SET key_config = ? WHERE user_id = ?", (key_config, user_id))
+        cur = await db.execute("SELECT user_id, username, referrer, subscription_end, outline_key_id, outline_access_url FROM users WHERE user_id = ?", (user_id,))
+        return await cur.fetchone()
+
+async def save_subscription(user_id: int, end_dt: datetime, outline_key_id: str | None, outline_access_url: str | None):
+    async with aiosqlite.connect(DATABASE) as db:
+        await db.execute("""
+            UPDATE users SET subscription_end = ?, outline_key_id = ?, outline_access_url = ? WHERE user_id = ?
+        """, (end_dt.isoformat(), outline_key_id, outline_access_url, user_id))
         await db.commit()
 
-async def get_user(user_id: int):
+async def create_payment_record(user_id: int, tariff_key: str):
+    tariff = TARIFFS[tariff_key]
+    now = datetime.utcnow().isoformat()
     async with aiosqlite.connect(DATABASE) as db:
-        cursor = await db.execute(
-            "SELECT user_id, username, paid, key_config, referrer, tariff FROM users WHERE user_id = ?",
-            (user_id,)
-        )
-        return await cursor.fetchone()
+        cur = await db.execute("""
+            INSERT INTO payments(user_id, tariff_key, amount, status, created_at) VALUES (?, ?, ?, 'pending', ?)
+        """, (user_id, tariff_key, tariff["price"], now))
+        await db.commit()
+        return cur.lastrowid
 
-async def get_referral_stats(user_id: int):
+async def set_payment_confirmed(payment_id: int, outline_key_id: str | None, outline_access_url: str | None):
+    now = datetime.utcnow().isoformat()
     async with aiosqlite.connect(DATABASE) as db:
-        cursor = await db.execute("SELECT COUNT(*) FROM referrals WHERE referrer = ?", (user_id,))
-        total = (await cursor.fetchone())[0]
-        cursor = await db.execute("""
-            SELECT COUNT(*) FROM users 
-            WHERE referrer = ? AND paid = 1
-        """, (user_id,))
-        paid = (await cursor.fetchone())[0]
-        return total, paid
+        await db.execute("""
+            UPDATE payments SET status='confirmed', confirmed_at=?, outline_key_id=?, outline_access_url=? WHERE id=?
+        """, (now, outline_key_id, outline_access_url, payment_id))
+        await db.commit()
 
-# --- Функция создания ключа в Outline API ---
+async def get_payment(payment_id: int):
+    async with aiosqlite.connect(DATABASE) as db:
+        cur = await db.execute("SELECT id, user_id, tariff_key, amount, status, created_at FROM payments WHERE id=?", (payment_id,))
+        return await cur.fetchone()
 
-async def create_outline_access_key():
+async def get_pending_payments():
+    async with aiosqlite.connect(DATABASE) as db:
+        cur = await db.execute("SELECT id, user_id, tariff_key, amount, created_at FROM payments WHERE status='pending'")
+        return await cur.fetchall()
+
+async def get_active_subscriptions_expired(before_dt: datetime):
+    async with aiosqlite.connect(DATABASE) as db:
+        cur = await db.execute("SELECT user_id, subscription_end, outline_key_id FROM users WHERE subscription_end IS NOT NULL")
+        rows = await cur.fetchall()
+        expired = []
+        for r in rows:
+            user_id, subscription_end, outline_key_id = r
+            if not subscription_end:
+                continue
+            try:
+                end_dt = datetime.fromisoformat(subscription_end)
+            except Exception:
+                continue
+            if end_dt <= before_dt:
+                expired.append((user_id, outline_key_id))
+        return expired
+
+async def extend_subscription(user_id: int, extra_days: int):
+    row = await get_user_row(user_id)
+    now = datetime.utcnow()
+    if row and row[3]:
+        try:
+            existing = datetime.fromisoformat(row[3])
+        except Exception:
+            existing = now
+    else:
+        existing = now
+    if existing > now:
+        new_end = existing + timedelta(days=extra_days)
+    else:
+        new_end = now + timedelta(days=extra_days)
+    await save_subscription(user_id, new_end, row[4] if row else None, row[5] if row else None)
+    return new_end
+
+# ----------------- Outline API -----------------
+
+async def outline_create_access_key():
+    """
+    Call Outline server to create access key.
+    Returns tuple (key_id, access_url) if success, otherwise (None, None).
+    """
     url = f"{OUTLINE_API_URL}/access-keys"
     headers = {
         "Content-Type": "application/json",
-        "X-Outline-Server-Cert-Sha256": OUTLINE_CERT_SHA256,
+        "X-Outline-Server-Cert-Sha256": OUTLINE_CERT_SHA256
     }
-    payload = {
-        "name": "VPN Key",
-        "accessUrl": None
-    }
+    payload = {"name": "FastVpn user key", "accessUrl": None}
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.post(url, json=payload, headers=headers, ssl=ssl_context) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    return data.get("accessUrl")
+            async with session.post(url, json=payload, headers=headers, ssl=ssl_context, timeout=30) as resp:
+                text = await resp.text()
+                if resp.status in (200, 201):
+                    data = json.loads(text) if text else {}
+                    # Outline typical response contains "id" and "accessUrl"
+                    key_id = data.get("id") or data.get("key") or data.get("accessKeyId")
+                    access_url = data.get("accessUrl") or data.get("access_url") or data.get("url") or data.get("accessKey")
+                    return key_id, access_url
+                else:
+                    logger.error("Outline create failed %s: %s", resp.status, text)
+                    return None, None
+    except Exception as e:
+        logger.exception("Outline create error: %s", e)
+        return None, None
+
+async def outline_delete_access_key(key_id: str):
+    """
+    Delete access key by id if API supports DELETE /access-keys/{id}
+    Returns True on success or if no id provided (nothing to do).
+    """
+    if not key_id:
+        return True
+    url = f"{OUTLINE_API_URL}/access-keys/{key_id}"
+    headers = {"X-Outline-Server-Cert-Sha256": OUTLINE_CERT_SHA256}
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.delete(url, headers=headers, ssl=ssl_context, timeout=30) as resp:
+                if resp.status in (200, 204):
+                    return True
                 else:
                     text = await resp.text()
-                    logging.error(f"Outline API error: {resp.status} {text}")
-                    return None
+                    logger.warning("Outline delete returned %s: %s", resp.status, text)
+                    return False
     except Exception as e:
-        logging.error(f"Outline API request error: {e}")
-        return None
+        logger.exception("Outline delete error: %s", e)
+        return False
 
-# --- Тексты и клавиатуры ---
+# ----------------- Keyboards & texts -----------------
 
 WELCOME_TEXT = (
-    "🌟 <b>Добро пожаловать в FastVpnBot!</b> 🌟\n\n"
-    "Здесь ты можешь быстро и просто получить VPN ключ для Outline, подключиться и быть всегда в безопасности! 🔐\n\n"
-    "Используй кнопки ниже, чтобы начать:\n"
+    "🎉 <b>Добро пожаловать в FastVPN!</b> 🎉\n\n"
+    "Я автоматизирую выдачу Outline VPN ключей после оплаты.\n\n"
+    "🔒 Защита соединения\n"
+    "⚡ Высокая скорость\n"
+    "🤝 Реферальная система (+7 дней за успешную оплату рефералом)\n\n"
+    "Выберите действие ниже ⤵️"
 )
 
-REKVIZITY_TEXT = (
-    "💳 <b>Реквизиты для оплаты:</b>\n\n"
-    "+7 932 222 99 30 (Ozon Bank)\n"
-    "Оплата по тарифам:\n"
-    "1 месяц — 99 ₽\n"
-    "3 месяца — 249 ₽\n"
-    "5 месяцев — 399 ₽\n\n"
-    "После оплаты нажми кнопку «💳 Оплатил(а)» для подтверждения.\n"
-)
-
-INSTRUCTION_TEXT = (
-    "🛠 <b>Как активировать VPN через Outline:</b>\n\n"
-    "1️⃣ Перейди в настройки телефона\n"
-    "2️⃣ Открой раздел <i>Telegram для бизнеса</i>\n"
-    "3️⃣ Нажми <i>Чат-боты</i>\n"
-    "4️⃣ Добавь бота <b>@FastVpn_bot_bot</b>\n\n"
-    "После оплаты нажми «💳 Оплатил(а)» — и я пришлю тебе ключ!\n"
-    "Если есть вопросы — пиши, помогу всегда! 😊"
-)
-
-def main_menu():
+def main_menu_kb():
     kb = InlineKeyboardMarkup(row_width=1)
     kb.add(
         InlineKeyboardButton("📃 Тарифы", callback_data="show_tariffs"),
         InlineKeyboardButton("👥 Реферальная система", callback_data="show_referral"),
-        InlineKeyboardButton("💳 Реквизиты", callback_data="show_rekvizity"),
-        InlineKeyboardButton("🛠 Инструкция", callback_data="instruction"),
-        InlineKeyboardButton("💳 Оплатил(а)", callback_data="paid"),
+        InlineKeyboardButton("🛠 Инструкция", callback_data="show_instruction"),
+        InlineKeyboardButton("💳 Реквизиты / Я оплатил(а)", callback_data="show_rekviz")
     )
     return kb
 
-def tariffs_menu(user_id):
+def tariffs_kb():
     kb = InlineKeyboardMarkup(row_width=1)
-    kb.add(
-        InlineKeyboardButton("1 месяц — 99 ₽", callback_data=confirm_cb.new(user_id=user_id, tariff="1 мес")),
-        InlineKeyboardButton("3 месяца — 249 ₽", callback_data=confirm_cb.new(user_id=user_id, tariff="3 мес")),
-        InlineKeyboardButton("5 месяцев — 399 ₽", callback_data=confirm_cb.new(user_id=user_id, tariff="5 мес")),
-        InlineKeyboardButton("⬅️ Назад", callback_data="main_menu"),
-    )
+    for key in ("1m", "3m", "5m"):
+        kb.add(InlineKeyboardButton(f"{TARIFFS[key]['name']} — {TARIFFS[key]['price']}₽", callback_data=f"tariff:{key}"))
+    kb.add(InlineKeyboardButton("⬅️ Назад", callback_data="main"))
     return kb
 
-# --- Хендлеры ---
+def rekviz_kb():
+    kb = InlineKeyboardMarkup(row_width=1)
+    kb.add(InlineKeyboardButton("✅ Я оплатил(а)", callback_data="paid"))
+    kb.add(InlineKeyboardButton("⬅️ Назад", callback_data="main"))
+    return kb
+
+def admin_confirm_kb(user_id: int, payment_id: int):
+    kb = InlineKeyboardMarkup(row_width=1)
+    kb.add(InlineKeyboardButton(f"✅ Подтвердить оплату {user_id} (#{payment_id})", callback_data=f"admin_confirm:{user_id}:{payment_id}"))
+    return kb
+
+REF_TEXT = (
+    "👥 <b>Реферальная система</b>\n\n"
+    "Делись своей ссылкой — за каждого приглашённого, оплатившего подписку, вы получите +7 дней.\n\n"
+    "Ваша реферальная ссылка будет показана ниже."
+)
+
+INSTRUCTION_TEXT = (
+    "📱 <b>Инструкция — как подключиться через Outline</b>\n\n"
+    "1) Установите приложение Outline (iOS/Android).\n"
+    "2) Получите от бота уникальный ключ после подтверждения оплаты.\n"
+    "3) В приложении Outline выберите Add key / Access key и вставьте ключ.\n\n"
+    "Если что-то не работает — пишите администратору."
+)
+
+REKVIZ_TEXT = (
+    f"💳 <b>Реквизиты для оплаты</b>\n\n{REKVIZITES}\n\n"
+    "После оплаты нажмите «✅ Я оплатил(а)» — админ получит уведомление и подтвердит платёж.\n\n"
+    "Тарифы:\n" +
+    "\n".join([f"• {TARIFFS[k]['name']} — {TARIFFS[k]['price']}₽" for k in ("1m","3m","5m")])
+)
+
+# ----------------- Handlers -----------------
 
 @dp.message_handler(commands=["start"])
 async def cmd_start(message: types.Message):
-    user_id = message.from_user.id
-    username = message.from_user.username or ""
+    args = message.get_args() or ""
     ref = None
-    args = message.get_args()
     if args:
-        m = re.search(r"ref=(\d+)", args)
+        # ожидаем форматы: ref=12345 or ref_12345 or ref12345
+        import re
+        m = re.search(r"ref[_=]?(\d+)", args)
         if m:
-            ref = int(m.group(1))
-            if ref == user_id:
+            try:
+                r = int(m.group(1))
+                if r != message.from_user.id:
+                    ref = r
+            except:
                 ref = None
+    await add_user_to_db(message.from_user.id, message.from_user.username or "", ref)
+    await message.answer(WELCOME_TEXT, reply_markup=main_menu_kb())
 
-    await add_user(user_id, username, ref)
-    await message.answer(WELCOME_TEXT, reply_markup=main_menu(), parse_mode="HTML")
+@dp.callback_query_handler(lambda c: c.data == "main")
+async def cb_main(query: types.CallbackQuery):
+    await query.answer()
+    await query.message.edit_text(WELCOME_TEXT, reply_markup=main_menu_kb())
 
-@dp.message_handler(commands=["ref"])
-async def cmd_referral(message: types.Message):
-    user_id = message.from_user.id
-    total, paid = await get_referral_stats(user_id)
-    ref_link = f"https://t.me/FastVpn_bot_bot?start=ref={user_id}"
-    text = (
-        f"👥 <b>Ваша реферальная ссылка:</b>\n"
-        f"{ref_link}\n\n"
-        f"👤 Всего перешло по ссылке: {total}\n"
-        f"✅ Активировали подписку: {paid}"
-    )
-    await message.answer(text, parse_mode="HTML")
+@dp.callback_query_handler(lambda c: c.data == "show_rekviz" or c.data == "show_rekvizity")
+async def cb_rekviz(query: types.CallbackQuery):
+    await query.answer()
+    await query.message.edit_text(REKVIZ_TEXT, reply_markup=rekviz_kb())
 
-@dp.message_handler(lambda m: m.text and not m.text.startswith('/'))
-async def any_message_reply(message: types.Message):
-    await message.answer(
-        f"Привет, {message.from_user.first_name}! Используй кнопки ниже, чтобы управлять VPN:",
-        reply_markup=main_menu(),
-        parse_mode="HTML"
-    )
-
-@dp.callback_query_handler(lambda c: c.data == "main_menu")
-async def cb_main_menu(call: types.CallbackQuery):
-    await call.answer()
-    await call.message.edit_text(WELCOME_TEXT, reply_markup=main_menu(), parse_mode="HTML")
+@dp.callback_query_handler(lambda c: c.data == "show_instruction" or c.data == "instruction")
+async def cb_instruction(query: types.CallbackQuery):
+    await query.answer()
+    await query.message.edit_text(INSTRUCTION_TEXT, reply_markup=InlineKeyboardMarkup().add(InlineKeyboardButton("⬅️ Назад", callback_data="main")))
 
 @dp.callback_query_handler(lambda c: c.data == "show_tariffs")
-async def cb_show_tariffs(call: types.CallbackQuery):
-    await call.answer()
-    kb = tariffs_menu(call.from_user.id)
-    await call.message.edit_text("📃 <b>Выберите тариф:</b>", reply_markup=kb, parse_mode="HTML")
+async def cb_tariffs(query: types.CallbackQuery):
+    await query.answer()
+    await query.message.edit_text("📃 <b>Выберите тариф:</b>", reply_markup=tariffs_kb())
 
-@dp.callback_query_handler(confirm_cb.filter())
-async def cb_confirm_payment(call: types.CallbackQuery, callback_data: dict):
-    user_id = int(callback_data["user_id"])
-    tariff = callback_data["tariff"]
-    if call.from_user.id != user_id:
-        await call.answer("Это не для вас!", show_alert=True)
+@dp.callback_query_handler(lambda c: c.data.startswith("tariff:"))
+async def cb_select_tariff(query: types.CallbackQuery):
+    tariff_key = query.data.split(":",1)[1]
+    if tariff_key not in TARIFFS:
+        await query.answer("Неверный тариф", show_alert=True)
         return
-
-    kb = InlineKeyboardMarkup()
-    kb.add(InlineKeyboardButton("💳 Оплатил(а)", callback_data="paid"))
-    await call.message.edit_text(f"Вы выбрали тариф: <b>{tariff}</b>\n\n{REKVIZITY_TEXT}", reply_markup=kb, parse_mode="HTML")
-
-@dp.callback_query_handler(lambda c: c.data == "paid")
-async def cb_paid(call: types.CallbackQuery):
-    user_id = call.from_user.id
-    await call.answer("Спасибо за оплату! Жду подтверждения от администратора.")
-    kb = InlineKeyboardMarkup()
-    kb.add(InlineKeyboardButton("✅ Подтвердить оплату", callback_data=f"admin_confirm_{user_id}"))
-    await bot.send_message(ADMIN_CHAT_ID, f"Пользователь @{call.from_user.username or user_id} (ID: {user_id}) оплатил подписку.", reply_markup=kb)
-
-@dp.callback_query_handler(lambda c: c.data and c.data.startswith("admin_confirm_"))
-async def cb_admin_confirm(call: types.CallbackQuery):
-    if call.from_user.id != YOUR_USER_ID:
-        await call.answer("У вас нет прав на это действие.", show_alert=True)
-        return
-    user_id = int(call.data.split("_")[-1])
-    await set_paid(user_id, "подписка")
-    key = await create_outline_access_key()
-    if key:
-        await set_key(user_id, key)
-        await bot.send_message(user_id, f"✅ Ваша подписка активирована!\n\nВот ваш VPN ключ для Outline:\n{key}")
-    else:
-        await bot.send_message(user_id, "❌ Ошибка при создании VPN ключа, свяжитесь с поддержкой.")
-    await call.answer("Оплата подтверждена и ключ отправлен пользователю.")
-    await call.message.edit_reply_markup()  # убираем кнопки
-
-@dp.callback_query_handler(lambda c: c.data == "show_rekvizity")
-async def cb_show_rekvizity(call: types.CallbackQuery):
-    await call.answer()
-    await call.message.edit_text(REKVIZITY_TEXT, reply_markup=InlineKeyboardMarkup().add(
-        InlineKeyboardButton("⬅️ Назад", callback_data="main_menu")
-    ), parse_mode="HTML")
-
-@dp.callback_query_handler(lambda c: c.data == "instruction")
-async def cb_instruction(call: types.CallbackQuery):
-    await call.answer()
-    await call.message.edit_text(
-        INSTRUCTION_TEXT,
-        reply_markup=InlineKeyboardMarkup().add(
-            InlineKeyboardButton("⬅️ Назад", callback_data="main_menu")
-        ),
-        parse_mode="HTML"
+    # создаём платеж запись pending
+    payment_id = await create_payment_record(query.from_user.id, tariff_key)
+    text = (
+        f"Вы выбрали тариф: <b>{TARIFFS[tariff_key]['name']}</b>\n"
+        f"Стоимость: <b>{TARIFFS[tariff_key]['price']}₽</b>\n\n"
+        f"{REKVIZ_TEXT}\n\n"
+        f"<i>Номер платежа:</i> <b>#{payment_id}</b>\n"
+        "После оплаты нажмите «✅ Я оплатил(а)» — админ получит запрос на подтверждение."
     )
+    kb = InlineKeyboardMarkup(row_width=1)
+    kb.add(InlineKeyboardButton("✅ Я оплатил(а)", callback_data=f"paid:{payment_id}"))
+    kb.add(InlineKeyboardButton("⬅️ Назад", callback_data="show_tariffs"))
+    await query.message.edit_text(text, reply_markup=kb)
+
+@dp.callback_query_handler(lambda c: c.data.startswith("paid"))
+async def cb_user_paid(query: types.CallbackQuery):
+    # data format: paid:<payment_id>
+    parts = query.data.split(":")
+    if len(parts) != 2:
+        await query.answer("Ошибка данных.", show_alert=True)
+        return
+    payment_id = int(parts[1])
+    payment = await get_payment(payment_id)
+    if not payment:
+        await query.answer("Платёж не найден.", show_alert=True)
+        return
+    if payment[4] != "pending":
+        await query.answer("Платёж уже в обработке.", show_alert=True)
+        return
+
+    # notify admin with confirm button (callback contains user_id and payment_id)
+    user_id = payment[1]
+    tariff_key = payment[2]
+    amount = payment[3]
+    text = (
+        f"📣 <b>Поступил запрос на подтверждение оплаты</b>\n\n"
+        f"Пользователь: <a href='tg://user?id={user_id}'>ID {user_id}</a>\n"
+        f"Тариф: {TARIFFS[tariff_key]['name']} — {amount}₽\n"
+        f"Платёж ID: #{payment_id}\n\n"
+        "Проверьте платёж и подтвердите (кнопка ниже) или используйте команду\n"
+        f"/activate {user_id} {payment_id}"
+    )
+    try:
+        await bot.send_message(ADMIN_CHAT_ID, text, reply_markup=admin_confirm_kb(user_id, payment_id))
+    except Exception as e:
+        logger.exception("Failed to send admin message: %s", e)
+    await query.answer("Запрос отправлен администратору. Ожидайте подтверждения.")
+    await query.message.edit_text("Спасибо! Запрос отправлен администратору. Ожидайте подтверждения.")
+
+@dp.callback_query_handler(lambda c: c.data.startswith("admin_confirm:"))
+async def cb_admin_confirm(query: types.CallbackQuery):
+    # data format admin_confirm:user_id:payment_id
+    if query.from_user.id != ADMIN_USER_ID:
+        await query.answer("У вас нет прав.", show_alert=True)
+        return
+    parts = query.data.split(":")
+    if len(parts) != 3:
+        await query.answer("Неверные данные.", show_alert=True)
+        return
+    user_id = int(parts[1])
+    payment_id = int(parts[2])
+    await process_activation_by_admin(user_id, payment_id, invoked_by=query.from_user.id, reply_message=query.message)
+    await query.answer("Подтверждение выполнено.")
+
+@dp.message_handler(commands=["activate"])
+async def cmd_activate(message: types.Message):
+    # admin command: /activate <user_id> <payment_id>
+    if message.from_user.id != ADMIN_USER_ID:
+        await message.reply("У вас нет прав для этой команды.")
+        return
+    args = message.get_args().split()
+    if len(args) < 2:
+        await message.reply("Использование: /activate <user_id> <payment_id>")
+        return
+    try:
+        user_id = int(args[0]); payment_id = int(args[1])
+    except:
+        await message.reply("Неверные аргументы.")
+        return
+    await message.reply("Активирую подписку...")
+    await process_activation_by_admin(user_id, payment_id, invoked_by=message.from_user.id, reply_message=message)
+
+async def process_activation_by_admin(user_id: int, payment_id: int, invoked_by: int, reply_message: types.Message | None = None):
+    payment = await get_payment(payment_id)
+    if not payment:
+        if reply_message:
+            await reply_message.reply("Платеж не найден.")
+        return
+    if payment[1] != user_id:
+        if reply_message:
+            await reply_message.reply("Платёж не принадлежит указанному пользователю.")
+        return
+    if payment[4] != "pending":
+        if reply_message:
+            await reply_message.reply("Платёж уже обработан.")
+        return
+
+    tariff_key = payment[2]
+    days = TARIFFS[tariff_key]["days"]
+
+    # create outline key
+    key_id, access_url = await outline_create_access_key()
+    if not (key_id or access_url):
+        if reply_message:
+            await reply_message.reply("Ошибка при создании ключа Outline. Сначала свяжитесь с админом.")
+        return
+
+    # mark payment confirmed
+    await set_payment_confirmed(payment_id, key_id, access_url)
+
+    # compute new subscription end (extend if already active)
+    user_row = await get_user_row(user_id)
+    now = datetime.utcnow()
+    if user_row and user_row[3]:
+        try:
+            existing_end = datetime.fromisoformat(user_row[3])
+        except:
+            existing_end = now
+    else:
+        existing_end = now
+
+    if existing_end > now:
+        new_end = existing_end + timedelta(days=days)
+    else:
+        new_end = now + timedelta(days=days)
+
+    # save subscription and outline key info to user
+    await save_subscription(user_id, new_end, key_id, access_url)
+
+    # if user has a referrer and hasn't been rewarded earlier (we reward on activation)
+    if user_row and user_row[2]:
+        referrer = user_row[2]
+        # give referrer +7 days
+        await extend_subscription(referrer, 7)
+        # optionally notify referrer
+        try:
+            await bot.send_message(referrer, f"✅ Вам начислено +7 дней за приглашение пользователя (ID {user_id}).")
+        except Exception:
+            pass
+
+    # notify user with key and end date
+    end_str = new_end.strftime("%Y-%m-%d %H:%M:%S UTC")
+    user_text = (
+        f"🎉 <b>Оплата подтверждена!</b>\n\n"
+        f"Ваш тариф: <b>{TARIFFS[tariff_key]['name']}</b>\n"
+        f"Подписка активна до: <b>{end_str}</b>\n\n"
+        "Ваш ключ Outline:\n"
+        f"<code>{access_url}</code>\n\n"
+        "Добавьте его в приложение Outline (Add key / Access key)."
+    )
+    try:
+        await bot.send_message(user_id, user_text)
+    except Exception as e:
+        logger.exception("Failed to message user: %s", e)
+
+    # update admin message or reply
+    if reply_message:
+        try:
+            await reply_message.reply(f"Платёж #{payment_id} подтверждён — подписка активирована до {end_str}.")
+        except Exception:
+            pass
+
+# ----------------- Referral info command -----------------
 
 @dp.callback_query_handler(lambda c: c.data == "show_referral")
-async def cb_show_referral(call: types.CallbackQuery):
-    await call.answer()
-    user_id = call.from_user.id
-    total, paid = await get_referral_stats(user_id)
-    ref_link = f"https://t.me/FastVpn_bot_bot?start=ref={user_id}"
-    text = (
-        f"👥 <b>Ваша реферальная ссылка:</b>\n"
-        f"{ref_link}\n\n"
-        f"👤 Всего перешло по ссылке: {total}\n"
-        f"✅ Активировали подписку: {paid}"
-    )
-    await call.message.edit_text(
-        text,
-        reply_markup=InlineKeyboardMarkup().add(
-            InlineKeyboardButton("⬅️ Назад", callback_data="main_menu")
-        ),
-        parse_mode="HTML"
-    )
+async def cb_show_referral(query: types.CallbackQuery):
+    await query.answer()
+    uid = query.from_user.id
+    # build referral link
+    link = f"https://t.me/{BOT_USERNAME}?start=ref_{uid}"
+    # get stats
+    async with aiosqlite.connect(DATABASE) as db:
+        cur = await db.execute("SELECT COUNT(*) FROM referrals WHERE referrer = ?", (uid,))
+        total = (await cur.fetchone())[0]
+        cur = await db.execute("""
+            SELECT COUNT(*) FROM users u
+            JOIN payments p ON p.user_id = u.user_id
+            WHERE u.referrer = ? AND p.status = 'confirmed'
+        """, (uid,))
+        paid = (await cur.fetchone())[0]
+    text = REF_TEXT + f"\n\nВаша ссылка:\n{link}\n\nВсего пришло: {total}\nОплатили: {paid}"
+    await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup().add(InlineKeyboardButton("⬅️ Назад", callback_data="main")))
 
-@dp.callback_query_handler(lambda c: c.data == "show_rekvizity")
-async def cb_show_rekvizity(call: types.CallbackQuery):
-    await call.answer()
-    await call.message.edit_text(
-        REKVIZITY_TEXT,
-        reply_markup=InlineKeyboardMarkup().add(
-            InlineKeyboardButton("⬅️ Назад", callback_data="main_menu")
-        ),
-        parse_mode="HTML"
-    )
+# ----------------- Background tasks -----------------
 
-@dp.callback_query_handler(lambda c: c.data == "main_menu")
-async def cb_main_menu(call: types.CallbackQuery):
-    await call.answer()
-    await call.message.edit_text(
-        WELCOME_TEXT,
-        reply_markup=main_menu(),
-        parse_mode="HTML"
-    )
+async def background_expiry_check():
+    """
+    Runs periodically. Finds expired subscriptions and deletes Outline keys (if possible),
+    clears user's subscription fields and notifies user/admin.
+    """
+    while True:
+        try:
+            now = datetime.utcnow()
+            expired = await get_active_subscriptions_expired(now)
+            for user_id, outline_key_id in expired:
+                # attempt to delete outline key
+                deleted = await outline_delete_access_key(outline_key_id)
+                # clear user's subscription fields
+                async with aiosqlite.connect(DATABASE) as db:
+                    await db.execute("UPDATE users SET subscription_end = NULL, outline_key_id = NULL, outline_access_url = NULL WHERE user_id = ?", (user_id,))
+                    await db.commit()
+                # notify user (best-effort)
+                try:
+                    await bot.send_message(user_id, "ℹ️ Ваша подписка истекла. Ключ был отключён. Для продления выберите тариф в боте.")
+                except Exception:
+                    pass
+                # notify admin
+                try:
+                    await bot.send_message(ADMIN_CHAT_ID, f"Подписка у пользователя {user_id} истекла. Ключ удалён: {deleted}")
+                except Exception:
+                    pass
+        except Exception as e:
+            logger.exception("Error in expiry check: %s", e)
+        # sleep 10 minutes
+        await asyncio.sleep(600)
 
-@dp.callback_query_handler(lambda c: c.data == "show_tariffs")
-async def cb_show_tariffs(call: types.CallbackQuery):
-    await call.answer()
-    kb = tariffs_menu(call.from_user.id)
-    await call.message.edit_text(
-        "📃 <b>Выберите тариф:</b>",
-        reply_markup=kb,
-        parse_mode="HTML"
-    )
+# ----------------- Startup / shutdown -----------------
 
-@dp.callback_query_handler(confirm_cb.filter())
-async def cb_confirm_payment(call: types.CallbackQuery, callback_data: dict):
-    user_id = int(callback_data["user_id"])
-    tariff = callback_data["tariff"]
-    if call.from_user.id != user_id:
-        await call.answer("Это не для вас!", show_alert=True)
-        return
-
-    kb = InlineKeyboardMarkup()
-    kb.add(InlineKeyboardButton("💳 Оплатил(а)", callback_data="paid"))
-    await call.message.edit_text(
-        f"Вы выбрали тариф: <b>{tariff}</b>\n\n{REKVIZITY_TEXT}",
-        reply_markup=kb,
-        parse_mode="HTML"
-    )
-
-@dp.callback_query_handler(lambda c: c.data == "paid")
-async def cb_paid(call: types.CallbackQuery):
-    user_id = call.from_user.id
-    await call.answer("Спасибо за оплату! Жду подтверждения от администратора.")
-    kb = InlineKeyboardMarkup()
-    kb.add(InlineKeyboardButton("✅ Подтвердить оплату", callback_data=f"admin_confirm_{user_id}"))
-    await bot.send_message(
-        ADMIN_CHAT_ID,
-        f"Пользователь @{call.from_user.username or user_id} (ID: {user_id}) оплатил подписку.",
-        reply_markup=kb
-    )
-
-@dp.callback_query_handler(lambda c: c.data and c.data.startswith("admin_confirm_"))
-async def cb_admin_confirm(call: types.CallbackQuery):
-    if call.from_user.id != YOUR_USER_ID:
-        await call.answer("У вас нет прав на это действие.", show_alert=True)
-        return
-    user_id = int(call.data.split("_")[-1])
-    await set_paid(user_id, "подписка")
-    key = await create_outline_access_key()
-    if key:
-        await set_key(user_id, key)
-        await bot.send_message(
-            user_id,
-            f"✅ Ваша подписка активирована!\n\nВот ваш VPN ключ для Outline:\n{key}"
-        )
-    else:
-        await bot.send_message(user_id, "❌ Ошибка при создании VPN ключа, свяжитесь с поддержкой.")
-    await call.answer("Оплата подтверждена и ключ отправлен пользователю.")
-    await call.message.edit_reply_markup()  # убираем кнопки
-
-@dp.message_handler(commands=["start"])
-async def cmd_start(message: types.Message):
-    user_id = message.from_user.id
-    username = message.from_user.username or ""
-    ref = None
-    args = message.get_args()
-    if args:
-        m = re.search(r"ref=(\d+)", args)
-        if m:
-            ref = int(m.group(1))
-            if ref == user_id:
-                ref = None
-
-    await add_user(user_id, username, ref)
-    await message.answer(
-        WELCOME_TEXT,
-        reply_markup=main_menu(),
-        parse_mode="HTML"
-    )
-
-@dp.message_handler(commands=["ref"])
-async def cmd_referral(message: types.Message):
-    user_id = message.from_user.id
-    total, paid = await get_referral_stats(user_id)
-    ref_link = f"https://t.me/FastVpn_bot_bot?start=ref={user_id}"
-    text = (
-        f"👥 <b>Ваша реферальная ссылка:</b>\n"
-        f"{ref_link}\n\n"
-        f"👤 Всего перешло по ссылке: {total}\n"
-        f"✅ Активировали подписку: {paid}"
-    )
-    await message.answer(text, parse_mode="HTML")
-
-@dp.message_handler(lambda m: m.text and not m.text.startswith('/'))
-async def any_message_reply(message: types.Message):
-    await message.answer(
-        f"Привет, {message.from_user.first_name}! Используй кнопки ниже, чтобы управлять VPN:",
-        reply_markup=main_menu(),
-        parse_mode="HTML"
-    )
-
-# Запуск бота
-
-from aiogram import executor
-
-async def main():
+async def on_startup(dp):
     await init_db()
-    logging.info("Бот запущен")
-    await dp.start_polling()
+    # start background task
+    dp.loop.create_task(background_expiry_check())
+    logger.info("Bot started and background tasks launched")
+
+# ----------------- Run -----------------
 
 if __name__ == "__main__":
-    import asyncio
-    asyncio.run(main())
+    executor.start_polling(dp, on_startup=on_startup)

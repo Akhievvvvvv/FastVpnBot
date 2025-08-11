@@ -239,7 +239,6 @@ async def outline_delete_access_key(key_id: str):
     except Exception as e:
         logger.exception("Outline delete error: %s", e)
         return False
-
 # ----------------- Keyboards & texts -----------------
 
 WELCOME_TEXT = (
@@ -276,7 +275,10 @@ def rekviz_kb():
 
 def admin_confirm_kb(user_id: int, payment_id: int):
     kb = InlineKeyboardMarkup(row_width=1)
-    kb.add(InlineKeyboardButton(f"✅ Подтвердить оплату {user_id} (#{payment_id})", callback_data=f"admin_confirm:{user_id}:{payment_id}"))
+    kb.add(
+        InlineKeyboardButton(f"✅ Подтвердить оплату {user_id} (#{payment_id})",
+                             callback_data=f"admin_confirm:{user_id}:{payment_id}")
+    )
     return kb
 
 REF_TEXT = (
@@ -307,7 +309,6 @@ async def cmd_start(message: types.Message):
     args = message.get_args() or ""
     ref = None
     if args:
-        # ожидаем форматы: ref=12345 or ref_12345 or ref12345
         import re
         m = re.search(r"ref[_=]?(\d+)", args)
         if m:
@@ -325,15 +326,16 @@ async def cb_main(query: types.CallbackQuery):
     await query.answer()
     await query.message.edit_text(WELCOME_TEXT, reply_markup=main_menu_kb())
 
-@dp.callback_query_handler(lambda c: c.data == "show_rekviz" or c.data == "show_rekvizity")
+@dp.callback_query_handler(lambda c: c.data in ["show_rekviz", "show_rekvizity"])
 async def cb_rekviz(query: types.CallbackQuery):
     await query.answer()
     await query.message.edit_text(REKVIZ_TEXT, reply_markup=rekviz_kb())
 
-@dp.callback_query_handler(lambda c: c.data == "show_instruction" or c.data == "instruction")
+@dp.callback_query_handler(lambda c: c.data in ["show_instruction", "instruction"])
 async def cb_instruction(query: types.CallbackQuery):
     await query.answer()
-    await query.message.edit_text(INSTRUCTION_TEXT, reply_markup=InlineKeyboardMarkup().add(InlineKeyboardButton("⬅️ Назад", callback_data="main")))
+    kb = InlineKeyboardMarkup().add(InlineKeyboardButton("⬅️ Назад", callback_data="main"))
+    await query.message.edit_text(INSTRUCTION_TEXT, reply_markup=kb)
 
 @dp.callback_query_handler(lambda c: c.data == "show_tariffs")
 async def cb_tariffs(query: types.CallbackQuery):
@@ -346,23 +348,26 @@ async def cb_select_tariff(query: types.CallbackQuery):
     if tariff_key not in TARIFFS:
         await query.answer("Неверный тариф", show_alert=True)
         return
-    # создаём платеж запись pending
+
     payment_id = await create_payment_record(query.from_user.id, tariff_key)
+
     text = (
-        f"Вы выбрали тариф: <b>{TARIFFS[tariff_key]['name']}</b>\n"
-        f"Стоимость: <b>{TARIFFS[tariff_key]['price']}₽</b>\n\n"
-        f"{REKVIZ_TEXT}\n\n"
+        f"🔥 <b>Вы выбрали тариф:</b> <i>{TARIFFS[tariff_key]['name']}</i>\n"
+        f"💰 <b>Цена:</b> {TARIFFS[tariff_key]['price']}₽\n\n"
+        f"💳 <b>Реквизиты для оплаты:</b>\n"
+        f"+7 932 222 99 30 (Ozon Bank)\n\n"
         f"<i>Номер платежа:</i> <b>#{payment_id}</b>\n"
         "После оплаты нажмите «✅ Я оплатил(а)» — админ получит запрос на подтверждение."
     )
+
     kb = InlineKeyboardMarkup(row_width=1)
     kb.add(InlineKeyboardButton("✅ Я оплатил(а)", callback_data=f"paid:{payment_id}"))
     kb.add(InlineKeyboardButton("⬅️ Назад", callback_data="show_tariffs"))
+
     await query.message.edit_text(text, reply_markup=kb)
 
 @dp.callback_query_handler(lambda c: c.data.startswith("paid"))
 async def cb_user_paid(query: types.CallbackQuery):
-    # data format: paid:<payment_id>
     parts = query.data.split(":")
     if len(parts) != 2:
         await query.answer("Ошибка данных.", show_alert=True)
@@ -375,6 +380,7 @@ async def cb_user_paid(query: types.CallbackQuery):
     if payment[4] != "pending":
         await query.answer("Платёж уже в обработке.", show_alert=True)
         return
+    # Далее можно добавить уведомление администратору и обработку
 
     # notify admin with confirm button (callback contains user_id and payment_id)
     user_id = payment[1]

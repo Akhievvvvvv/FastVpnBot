@@ -550,7 +550,8 @@ async def background_expiry_check():
 async def on_startup(dp):
     await init_db()
     # start background task
-    dp.loop.create_task(background_expiry_check())
+    import asyncio
+    asyncio.create_task(background_expiry_check())
     logger.info("Bot started and background tasks launched")
 
 # ----------------- Run -----------------

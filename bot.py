@@ -50,7 +50,6 @@ ssl_context.verify_mode = ssl.CERT_NONE
 
 async def init_db():
     async with aiosqlite.connect(DATABASE) as db:
-        # users: user_id, username, referrer, subscription_end, outline_key_id, outline_access_url
         await db.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 user_id INTEGER PRIMARY KEY,
@@ -61,7 +60,12 @@ async def init_db():
                 outline_access_url TEXT
             )
         """)
-        # payments: history and pending payments
+        # Проверяем и добавляем колонку subscription_end, если её нет
+        try:
+            await db.execute("SELECT subscription_end FROM users LIMIT 1")
+        except aiosqlite.OperationalError:
+            await db.execute("ALTER TABLE users ADD COLUMN subscription_end TEXT")
+        
         await db.execute("""
             CREATE TABLE IF NOT EXISTS payments (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -73,13 +77,6 @@ async def init_db():
                 confirmed_at TEXT,
                 outline_key_id TEXT,
                 outline_access_url TEXT
-            )
-        """)
-        # referrals table to store who referred whom (avoid duplicates)
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS referrals (
-                referrer INTEGER,
-                referee INTEGER PRIMARY KEY
             )
         """)
         await db.commit()

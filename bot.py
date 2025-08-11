@@ -60,12 +60,25 @@ async def init_db():
                 outline_access_url TEXT
             )
         """)
+
         # Проверяем и добавляем колонку subscription_end, если её нет
         try:
             await db.execute("SELECT subscription_end FROM users LIMIT 1")
         except aiosqlite.OperationalError:
             await db.execute("ALTER TABLE users ADD COLUMN subscription_end TEXT")
-        
+
+        # Проверяем и добавляем колонку outline_key_id, если её нет
+        try:
+            await db.execute("SELECT outline_key_id FROM users LIMIT 1")
+        except aiosqlite.OperationalError:
+            await db.execute("ALTER TABLE users ADD COLUMN outline_key_id TEXT")
+
+        # Проверяем и добавляем колонку outline_access_url, если её нет
+        try:
+            await db.execute("SELECT outline_access_url FROM users LIMIT 1")
+        except aiosqlite.OperationalError:
+            await db.execute("ALTER TABLE users ADD COLUMN outline_access_url TEXT")
+
         await db.execute("""
             CREATE TABLE IF NOT EXISTS payments (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -77,6 +90,13 @@ async def init_db():
                 confirmed_at TEXT,
                 outline_key_id TEXT,
                 outline_access_url TEXT
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS referrals (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                referrer INTEGER,
+                referee INTEGER
             )
         """)
         await db.commit()

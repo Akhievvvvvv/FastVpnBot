@@ -492,20 +492,20 @@ async def process_activation_by_admin(user_id: int, payment_id: int, invoked_by:
         except Exception:
             pass
 
-    # notify user with key and end date
-end_str = new_end.strftime("%Y-%m-%d %H:%M:%S UTC")
-user_text = (
-    f"🎉 <b>Оплата подтверждена!</b>\n\n"
-    f"Ваш тариф: <b>{TARIFFS[tariff_key]['name']}</b>\n"
-    f"Подписка активна до: <b>{end_str}</b>\n\n"
-    "Ваш ключ Outline:\n"
-    f"<code>{access_url}</code>\n\n"
-    "Добавьте его в приложение Outline (Add key / Access key)."
-)
-try:
-    await bot.send_message(user_id, user_text, parse_mode='HTML')
-except Exception as e:
-    logger.exception("Failed to message user: %s", e)
+        # notify user with key and end date
+    end_str = new_end.strftime("%Y-%m-%d %H:%M:%S UTC")
+    user_text = (
+        f"🎉 <b>Оплата подтверждена!</b>\n\n"
+        f"Ваш тариф: <b>{TARIFFS[tariff_key]['name']}</b>\n"
+        f"Подписка активна до: <b>{end_str}</b>\n\n"
+        "Ваш ключ Outline:\n"
+        f"<code>{access_url}</code>\n\n"
+        "Добавьте его в приложение Outline (Add key / Access key)."
+    )
+    try:
+        await bot.send_message(user_id, user_text, parse_mode='HTML')
+    except Exception as e:
+        logger.exception("Failed to message user: %s", e)
 
     # update admin message or reply
     if reply_message:
